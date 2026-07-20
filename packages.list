@@ -39,4 +39,3 @@ grub-efi
 efibootmgr
 dosfstools
 e2fsprogs
-ollama
