@@ -58,8 +58,9 @@ jobs:
       - name: Prepare ISO directory
         run: |
           mkdir -p iso/boot/grub
-          cp rootfs/boot/vmlinuz-lts iso/boot/
+          sudo cp rootfs/boot/vmlinuz-lts iso/boot/
           sudo cp rootfs/boot/initramfs-lts iso/boot/
+          sudo chmod +r iso/boot/vmlinuz-lts iso/boot/initramfs-lts
           cp alpine.squashfs iso/
 
           # isolinux
