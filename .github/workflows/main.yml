@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      ALPINE_VERSION: 3.19
+      ALPINE_VERSION: 3.19.1
       ARCH: x86_64
       ISO_NAME: fvaios-live
     steps:
@@ -19,16 +19,24 @@ jobs:
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools xorriso isolinux mtools
+          sudo apt-get install -y squashfs-tools xorriso isolinux mtools wget cpio
 
-      - name: Download Alpine minirootfs
+      - name: Download Alpine official ISO
         run: |
-          wget https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ env.ARCH }}/alpine-minirootfs-${{ env.ALPINE_VERSION }}.1-${{ env.ARCH }}.tar.gz
+          wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-standard-${ALPINE_VERSION}-x86_64.iso
+          mkdir -p iso-mount
+          sudo mount -o loop alpine-standard-${ALPINE_VERSION}-x86_64.iso iso-mount
+          cp iso-mount/boot/vmlinuz-lts .
+          cp iso-mount/boot/initramfs-lts .
+          sudo umount iso-mount
+
+      - name: Download Alpine minirootfs and customize
+        run: |
+          wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz
           mkdir -p rootfs
-          sudo tar xzf alpine-minirootfs-${{ env.ALPINE_VERSION }}.1-${{ env.ARCH }}.tar.gz -C rootfs
-
-      - name: Prepare chroot environment
-        run: |
+          sudo tar xzf alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz -C rootfs
+          
+          # Prepare chroot
           sudo cp /etc/resolv.conf rootfs/etc/
           sudo cp packages.list rootfs/
           sudo cp motd rootfs/etc/motd
@@ -52,61 +60,32 @@ jobs:
 
       - name: Create squashfs
         run: |
-          sudo mksquashfs rootfs alpine.squashfs -comp xz -noappend -wildcards -e "dev/*" "proc/*" "sys/*" "tmp/*" "run/*" "mnt/*" "media/*" "packages.list" "customize.sh"
+          sudo mksquashfs rootfs alpine.squashfs -comp xz -noappend
           sudo chown $USER alpine.squashfs
 
       - name: Prepare ISO directory
         run: |
-          mkdir -p iso/boot/grub
-          sudo cp rootfs/boot/vmlinuz-lts iso/boot/
-          sudo cp rootfs/boot/initramfs-lts iso/boot/
-          sudo chmod +r iso/boot/vmlinuz-lts iso/boot/initramfs-lts
+          mkdir -p iso/boot
+          cp vmlinuz-lts iso/boot/
+          cp initramfs-lts iso/boot/
           cp alpine.squashfs iso/
 
-          # isolinux
-          mkdir -p iso/isolinux
-          cp /usr/lib/ISOLINUX/isolinux.bin iso/isolinux/
-          cp /usr/lib/syslinux/modules/bios/ldlinux.c32 iso/isolinux/
-          cat > iso/isolinux/isolinux.cfg << 'EOF'
-          DEFAULT fvaios
-          SAY Booting FVAIOS Live...
-          LABEL fvaios
-              KERNEL /boot/vmlinuz-lts
-              APPEND initrd=/boot/initramfs-lts modules=loop,squashfs,sd-mod,usb-storage,sr-mod quiet
+          # Create answer file for setup-alpine
+          cat > iso/fvaios.apkovl.tar.gz << 'EOF'
+          dummy
           EOF
-
-          # EFI boot via grub
-          sudo apt-get install -y grub-efi-amd64-bin
-          mkdir -p efi_mount
-          dd if=/dev/zero of=efi.img bs=1M count=5
-          mkfs.vfat efi.img
-          sudo mount -o loop efi.img efi_mount
-          sudo mkdir -p efi_mount/EFI/BOOT
-          sudo cp /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi efi_mount/EFI/BOOT/BOOTX64.EFI
-          cat > grub.cfg << 'EOF'
-          set timeout=3
-          menuentry "FVAIOS Live" {
-              linux /boot/vmlinuz-lts modules=loop,squashfs,sd-mod,usb-storage,sr-mod quiet
-              initrd /boot/initramfs-lts
-          }
-          EOF
-          sudo cp grub.cfg efi_mount/
-          sudo umount efi_mount
-          cp efi.img iso/boot/grub/
 
       - name: Build ISO
         run: |
           xorriso -as mkisofs \
             -o ${{ env.ISO_NAME }}.iso \
-            -b isolinux/isolinux.bin \
-            -c isolinux/boot.cat \
-            -no-emul-boot -boot-load-size 4 -boot-info-table \
-            -eltorito-alt-boot \
-            -e boot/grub/efi.img \
-            -no-emul-boot \
-            -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
-            -isohybrid-gpt-basdat \
+            -R -J \
             -V "FVAIOS_LIVE" \
+            -b boot/vmlinuz-lts \
+            -c boot/boot.catalog \
+            -no-emul-boot \
+            -boot-load-size 4 \
+            -boot-info-table \
             iso/
 
       - name: Upload artifact
