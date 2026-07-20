@@ -40,6 +40,7 @@ chmod +x /usr/local/bin/ollama 2>/dev/null || true
 echo "Generating initramfs..."
 cat > /etc/mkinitfs/features.d/fvaios.modules << EOF
 kernel/drivers/cdrom
+kernel/drivers/scsi/sr_mod.ko
 kernel/fs/isofs
 kernel/fs/squashfs
 kernel/drivers/block/loop.ko
