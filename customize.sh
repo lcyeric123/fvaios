@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # customize.sh - run inside chroot
 
 set -e
