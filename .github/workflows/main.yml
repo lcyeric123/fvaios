@@ -19,9 +19,20 @@ jobs:
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools xorriso isolinux mtools wget
+          sudo apt-get install -y squashfs-tools xorriso wget
 
-      - name: Download and customize Alpine minirootfs
+      - name: Download Alpine official ISO
+        run: |
+          wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-standard-${ALPINE_VERSION}-x86_64.iso
+          
+      - name: Extract official ISO files
+        run: |
+          mkdir -p official_iso custom_iso
+          sudo mount -o loop alpine-standard-${ALPINE_VERSION}-x86_64.iso official_iso
+          cp -r official_iso/* custom_iso/
+          sudo umount official_iso
+
+      - name: Build custom rootfs
         run: |
           wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz
           mkdir -p rootfs
@@ -35,48 +46,33 @@ jobs:
           sudo mount --bind /dev rootfs/dev
           sudo mount --bind /proc rootfs/proc
           sudo mount --bind /sys rootfs/sys
-
-      - name: Customize rootfs
-        run: |
           sudo cp customize.sh rootfs/
           sudo chroot rootfs /bin/sh /customize.sh
-
-      - name: Cleanup chroot
-        run: |
           sudo umount -l rootfs/dev
           sudo umount -l rootfs/proc
           sudo umount -l rootfs/sys
 
-      - name: Build ISO
+      - name: Replace squashfs in custom ISO
         run: |
-          mkdir -p iso
-          sudo cp rootfs/boot/vmlinuz-lts iso/
-          sudo cp rootfs/boot/initramfs-lts iso/
-          sudo chmod 644 iso/vmlinuz-lts iso/initramfs-lts
-          
-          sudo mksquashfs rootfs iso/alpine.squashfs -comp xz -noappend
-          
-          mkdir -p iso/isolinux
-          cat > iso/isolinux/isolinux.cfg << 'EOF'
-          DEFAULT fvaios
-          SAY Booting FVAIOS Live...
-          
-          LABEL fvaios
-              KERNEL /vmlinuz-lts
-              INITRD /initramfs-lts
-              APPEND modules=loop,squashfs,sd-mod,usb-storage,sr-mod quiet
-          EOF
-          
+          sudo mksquashfs rootfs custom_iso/alpine.squashfs -comp xz -noappend
+          sudo chown $USER custom_iso/alpine.squashfs
+
+      - name: Create bootable ISO
+        run: |
           xorriso -as mkisofs \
             -o ${{ env.ISO_NAME }}.iso \
             -R -J \
-            -b isolinux/isolinux.cfg \
+            -b boot/syslinux/isolinux.bin \
+            -c boot/syslinux/boot.cat \
             -no-emul-boot \
             -boot-load-size 4 \
             -boot-info-table \
+            -eltorito-alt-boot \
+            -e boot/grub/efi.img \
+            -no-emul-boot \
             -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
             -V "FVAIOS_LIVE" \
-            iso/
+            custom_iso/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
