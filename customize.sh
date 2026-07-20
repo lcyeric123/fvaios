@@ -28,10 +28,9 @@ rc-update add sshd default
 rc-update add nginx default
 rc-update add php-fpm81 default
 
-# install ollama binary
+# install ollama via official script (ignore systemd errors)
 echo "Installing ollama..."
-curl -fsSL https://ollama.com/download/ollama-linux-amd64 -o /usr/local/bin/ollama
-chmod +x /usr/local/bin/ollama
+curl -fsSL https://ollama.com/install.sh | sh || true
 
 # generate initramfs for live boot
 echo "Generating initramfs..."
