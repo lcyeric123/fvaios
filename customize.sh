@@ -28,6 +28,11 @@ rc-update add sshd default
 rc-update add nginx default
 rc-update add php-fpm81 default
 
+# install ollama binary
+echo "Installing ollama..."
+curl -fsSL https://ollama.com/download/ollama-linux-amd64 -o /usr/local/bin/ollama
+chmod +x /usr/local/bin/ollama
+
 # generate initramfs for live boot
 echo "Generating initramfs..."
 cat > /etc/mkinitfs/features.d/fvaios.modules << EOF
