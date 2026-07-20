@@ -36,6 +36,9 @@ echo "Installing ollama..."
 curl -fsSL https://ollama.com/install.sh | sh || true
 chmod +x /usr/local/bin/ollama 2>/dev/null || true
 
+# create necessary directories for initramfs
+mkdir -p /media/cdrom /media/usb
+
 # generate initramfs for live boot
 echo "Generating initramfs..."
 cat > /etc/mkinitfs/features.d/fvaios.modules << EOF
