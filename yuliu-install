@@ -1,0 +1,112 @@
+#!/bin/bash
+# yuliu-install - persistent disk installation script
+
+set -e
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This script must be run as root. Try: sudo yuliu-install"
+    exit 1
+fi
+
+clear
+echo "================ FVAIOS Installer ================"
+echo "WARNING: This will DESTROY ALL DATA on the selected disk."
+echo ""
+
+# list disks
+echo "Available disks:"
+lsblk -d -o NAME,SIZE,TYPE,MOUNTPOINT | grep -E 'disk' || true
+echo ""
+read -rp "Enter disk to install to (e.g. sda): " DISK
+DISK_PATH="/dev/${DISK}"
+if [ ! -b "$DISK_PATH" ]; then
+    echo "Invalid disk: $DISK_PATH"
+    exit 1
+fi
+
+echo ""
+echo "You selected: $DISK_PATH"
+read -rp "ALL DATA WILL BE LOST. Type YES to continue: " CONFIRM
+if [ "$CONFIRM" != "YES" ]; then
+    echo "Aborted."
+    exit 0
+fi
+
+# detect boot mode
+if [ -d /sys/firmware/efi ]; then
+    BOOT_MODE="uefi"
+else
+    BOOT_MODE="bios"
+fi
+echo "Boot mode: $BOOT_MODE"
+
+echo "Partitioning..."
+umount ${DISK_PATH}* 2>/dev/null || true
+swapoff ${DISK_PATH}* 2>/dev/null || true
+dd if=/dev/zero of=$DISK_PATH bs=1M count=10 conv=notrunc
+partprobe $DISK_PATH
+
+if [ "$BOOT_MODE" = "uefi" ]; then
+    parted -s $DISK_PATH mklabel gpt
+    parted -s $DISK_PATH mkpart ESP fat32 1MiB 261MiB
+    parted -s $DISK_PATH set 1 boot on
+    parted -s $DISK_PATH mkpart root ext4 261MiB 100%
+    ROOT_PART="${DISK_PATH}2"
+    EFI_PART="${DISK_PATH}1"
+else
+    parted -s $DISK_PATH mklabel msdos
+    parted -s $DISK_PATH mkpart primary ext4 1MiB 100%
+    parted -s $DISK_PATH set 1 boot on
+    ROOT_PART="${DISK_PATH}1"
+fi
+
+sleep 2
+partprobe $DISK_PATH
+mkfs.ext4 -F $ROOT_PART
+if [ "$BOOT_MODE" = "uefi" ]; then
+    mkfs.fat -F32 $EFI_PART
+fi
+
+echo "Mounting root partition..."
+mount $ROOT_PART /mnt
+mkdir -p /mnt/boot
+if [ "$BOOT_MODE" = "uefi" ]; then
+    mkdir -p /mnt/boot/efi
+    mount $EFI_PART /mnt/boot/efi
+fi
+
+echo "Copying system files..."
+rsync -aAX / /mnt/ --exclude={/dev,/proc,/sys,/tmp,/run,/mnt,/media,/lost+found}
+
+# prepare fstab
+mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/tmp /mnt/run
+mount --bind /dev /mnt/dev
+mount --bind /proc /mnt/proc
+mount --bind /sys /mnt/sys
+
+ROOT_UUID=$(blkid -s UUID -o value $ROOT_PART)
+echo "UUID=$ROOT_UUID / ext4 defaults 0 1" > /mnt/etc/fstab
+if [ "$BOOT_MODE" = "uefi" ]; then
+    EFI_UUID=$(blkid -s UUID -o value $EFI_PART)
+    echo "UUID=$EFI_UUID /boot/efi vfat defaults 0 0" >> /mnt/etc/fstab
+fi
+
+# install grub
+echo "Installing GRUB..."
+if [ "$BOOT_MODE" = "uefi" ]; then
+    chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=FVAIOS --no-nvram
+else
+    chroot /mnt grub-install --target=i386-pc $DISK_PATH
+fi
+chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+# cleanup
+umount -l /mnt/dev
+umount -l /mnt/proc
+umount -l /mnt/sys
+if [ "$BOOT_MODE" = "uefi" ]; then
+    umount /mnt/boot/efi
+fi
+umount /mnt
+
+echo "Installation complete. Remove live media and reboot."
