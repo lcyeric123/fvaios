@@ -1,4 +1,3 @@
-# .github/workflows/fvaios-build.yml
 name: Build FVAIOS Live ISO
 
 on:
@@ -34,6 +33,7 @@ jobs:
           sudo cp packages.list rootfs/
           sudo cp motd rootfs/etc/motd
           sudo cp build_llama.sh rootfs/
+          sudo mkdir -p rootfs/usr/local/sbin
           sudo cp yuliu-install rootfs/usr/local/sbin/
           sudo chmod +x rootfs/build_llama.sh rootfs/usr/local/sbin/yuliu-install
           sudo mount --bind /dev rootfs/dev
