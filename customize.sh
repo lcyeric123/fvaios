@@ -11,7 +11,9 @@ EOF
 
 apk update
 
-# install packages from list
+# install packages from list (need zstd for ollama extraction)
+apk add --no-cache zstd
+
 grep -v '^\s*#' /packages.list | grep -v '^\s*$' | while read -r pkg; do
     apk add --no-cache "$pkg"
 done
@@ -28,11 +30,12 @@ rc-update add sshd default
 rc-update add nginx default
 rc-update add php-fpm81 default
 
-# install ollama binary (direct download)
+# install ollama using official script (ignore service setup errors)
 echo "Installing ollama..."
-OLLAMA_VERSION="v0.5.4"
-curl -fsSL "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64" -o /usr/local/bin/ollama
-chmod +x /usr/local/bin/ollama
+curl -fsSL https://ollama.com/install.sh | sh || true
+
+# Manually ensure binary is executable
+chmod +x /usr/local/bin/ollama 2>/dev/null || true
 
 # generate initramfs for live boot
 echo "Generating initramfs..."
