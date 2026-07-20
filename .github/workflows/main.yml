@@ -59,7 +59,7 @@ jobs:
         run: |
           mkdir -p iso/boot/grub
           cp rootfs/boot/vmlinuz-lts iso/boot/
-          cp rootfs/boot/initramfs-lts iso/boot/
+          sudo cp rootfs/boot/initramfs-lts iso/boot/
           cp alpine.squashfs iso/
 
           # isolinux
