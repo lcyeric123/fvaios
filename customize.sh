@@ -11,7 +11,7 @@ EOF
 
 apk update
 
-# install packages from list, skip comments and empty lines
+# install packages from list
 grep -v '^\s*#' /packages.list | grep -v '^\s*$' | while read -r pkg; do
     apk add --no-cache "$pkg"
 done
@@ -28,10 +28,6 @@ rc-update add sshd default
 rc-update add nginx default
 rc-update add php-fpm81 default
 
-# build llama.cpp static
-echo "Building llama.cpp ..."
-/build_llama.sh
-
 # generate initramfs for live boot
 echo "Generating initramfs..."
 cat > /etc/mkinitfs/features.d/fvaios.modules << EOF
@@ -43,5 +39,5 @@ EOF
 mkinitfs -c /etc/mkinitfs/mkinitfs.conf -b / -o /boot/initramfs-lts $(cat /usr/share/mkinitfs/features.d/../features.list) base squashfs cdrom usb fvaios
 
 # clean up
-rm /packages.list /build_llama.sh /customize.sh
+rm /packages.list /customize.sh
 rm -rf /var/cache/apk/*
