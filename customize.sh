@@ -28,9 +28,13 @@ rc-update add sshd default
 rc-update add nginx default
 rc-update add php-fpm81 default
 
-# install ollama via official script (ignore systemd errors)
+# install ollama binary (direct download)
 echo "Installing ollama..."
-curl -fsSL https://ollama.com/install.sh | sh || true
+apk add --no-cache zstd
+curl -fsSL "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tgz" -o /tmp/ollama.tgz
+tar -xzf /tmp/ollama.tgz -C /usr/local
+chmod +x /usr/local/bin/ollama
+rm -f /tmp/ollama.tgz
 
 # generate initramfs for live boot
 echo "Generating initramfs..."
@@ -40,7 +44,8 @@ kernel/fs/isofs
 kernel/fs/squashfs
 kernel/drivers/block/loop.ko
 EOF
-mkinitfs -c /etc/mkinitfs/mkinitfs.conf -b / -o /boot/initramfs-lts $(cat /usr/share/mkinitfs/features.d/../features.list) base squashfs cdrom usb fvaios
+KVER=$(ls /lib/modules | head -1)
+mkinitfs -o /boot/initramfs-lts $KVER
 
 # clean up
 rm /packages.list /customize.sh
