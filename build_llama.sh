@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # build_llama.sh - compile llama.cpp static binaries in chroot
 
 set -e
