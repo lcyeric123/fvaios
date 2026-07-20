@@ -47,20 +47,17 @@ jobs:
           sudo umount -l rootfs/proc
           sudo umount -l rootfs/sys
 
-      - name: Build ISO structure
+      - name: Build ISO
         run: |
-          # Extract kernel and initramfs from rootfs
           mkdir -p iso
           sudo cp rootfs/boot/vmlinuz-lts iso/
           sudo cp rootfs/boot/initramfs-lts iso/
           sudo chmod 644 iso/vmlinuz-lts iso/initramfs-lts
           
-          # Create squashfs of rootfs
           sudo mksquashfs rootfs iso/alpine.squashfs -comp xz -noappend
           
-          # Create syslinux config
-          mkdir -p iso/syslinux
-          cat > iso/syslinux/syslinux.cfg << 'EOF'
+          mkdir -p iso/isolinux
+          cat > iso/isolinux/isolinux.cfg << 'EOF'
           DEFAULT fvaios
           SAY Booting FVAIOS Live...
           
@@ -70,18 +67,14 @@ jobs:
               APPEND modules=loop,squashfs,sd-mod,usb-storage,sr-mod quiet
           EOF
           
-          # Make ISO bootable with syslinux
-          sudo apt-get install -y syslinux-utils
-          
-          # Create the ISO
           xorriso -as mkisofs \
             -o ${{ env.ISO_NAME }}.iso \
             -R -J \
-            -syslinux-mbr /usr/lib/syslinux/bios/mbr.bin \
-            -b syslinux/syslinux.cfg \
+            -b isolinux/isolinux.cfg \
             -no-emul-boot \
             -boot-load-size 4 \
             -boot-info-table \
+            -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
             -V "FVAIOS_LIVE" \
             iso/
 
