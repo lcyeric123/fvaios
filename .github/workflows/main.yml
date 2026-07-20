@@ -32,10 +32,9 @@ jobs:
           sudo cp /etc/resolv.conf rootfs/etc/
           sudo cp packages.list rootfs/
           sudo cp motd rootfs/etc/motd
-          sudo cp build_llama.sh rootfs/
           sudo mkdir -p rootfs/usr/local/sbin
           sudo cp yuliu-install rootfs/usr/local/sbin/
-          sudo chmod +x rootfs/build_llama.sh rootfs/usr/local/sbin/yuliu-install
+          sudo chmod +x rootfs/usr/local/sbin/yuliu-install
           sudo mount --bind /dev rootfs/dev
           sudo mount --bind /proc rootfs/proc
           sudo mount --bind /sys rootfs/sys
@@ -53,7 +52,7 @@ jobs:
 
       - name: Create squashfs
         run: |
-          sudo mksquashfs rootfs alpine.squashfs -comp xz -noappend -wildcards -e "dev/*" "proc/*" "sys/*" "tmp/*" "run/*" "mnt/*" "media/*" "packages.list" "build_llama.sh" "customize.sh"
+          sudo mksquashfs rootfs alpine.squashfs -comp xz -noappend -wildcards -e "dev/*" "proc/*" "sys/*" "tmp/*" "run/*" "mnt/*" "media/*" "packages.list" "customize.sh"
           sudo chown $USER alpine.squashfs
 
       - name: Prepare ISO directory
