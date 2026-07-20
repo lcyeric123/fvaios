@@ -23,9 +23,9 @@ jobs:
 
       - name: Download Alpine minirootfs
         run: |
-          wget https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/releases/${ARCH}/alpine-minirootfs-${ALPINE_VERSION}.1-${ARCH}.tar.gz
+          wget https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ env.ARCH }}/alpine-minirootfs-${{ env.ALPINE_VERSION }}.1-${{ env.ARCH }}.tar.gz
           mkdir -p rootfs
-          sudo tar xzf alpine-minirootfs-${ALPINE_VERSION}.1-${ARCH}.tar.gz -C rootfs
+          sudo tar xzf alpine-minirootfs-${{ env.ALPINE_VERSION }}.1-${{ env.ARCH }}.tar.gz -C rootfs
 
       - name: Prepare chroot environment
         run: |
@@ -97,7 +97,7 @@ jobs:
       - name: Build ISO
         run: |
           xorriso -as mkisofs \
-            -o ${ISO_NAME}.iso \
+            -o ${{ env.ISO_NAME }}.iso \
             -b isolinux/isolinux.bin \
             -c isolinux/boot.cat \
             -no-emul-boot -boot-load-size 4 -boot-info-table \
@@ -113,13 +113,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fvaios-iso
-          path: ${ISO_NAME}.iso
+          path: ${{ env.ISO_NAME }}.iso
 
       - name: Create release and upload ISO
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.run_id }}
           name: "FVAIOS Live ${{ github.run_id }}"
-          files: ${ISO_NAME}.iso
+          files: ${{ env.ISO_NAME }}.iso
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
