@@ -72,7 +72,7 @@ jobs:
           SAY Booting FVAIOS Live...
           LABEL fvaios
               KERNEL /boot/vmlinuz-lts
-              APPEND initrd=/boot/initramfs-lts modules=loop,squashfs,cdrom quiet alpine_dev=cdrom:iso9660
+              APPEND initrd=/boot/initramfs-lts modules=loop,squashfs,cdrom quiet
           EOF
 
           # EFI boot via grub
@@ -86,7 +86,7 @@ jobs:
           cat > grub.cfg << 'EOF'
           set timeout=3
           menuentry "FVAIOS Live" {
-              linux /boot/vmlinuz-lts modules=loop,squashfs,cdrom quiet alpine_dev=cdrom:iso9660
+              linux /boot/vmlinuz-lts modules=loop,squashfs,cdrom quiet
               initrd /boot/initramfs-lts
           }
           EOF
