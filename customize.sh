@@ -11,11 +11,10 @@ EOF
 
 apk update
 
-# install packages from list
-while read -r pkg; do
-    [ -z "$pkg" ] && continue
+# install packages from list, skip comments and empty lines
+grep -v '^\s*#' /packages.list | grep -v '^\s*$' | while read -r pkg; do
     apk add --no-cache "$pkg"
-done < /packages.list
+done
 
 # set hostname
 echo "fvaios" > /etc/hostname
