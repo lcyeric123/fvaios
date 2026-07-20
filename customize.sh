@@ -30,11 +30,9 @@ rc-update add php-fpm81 default
 
 # install ollama binary (direct download)
 echo "Installing ollama..."
-apk add --no-cache zstd
-curl -fsSL "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tgz" -o /tmp/ollama.tgz
-tar -xzf /tmp/ollama.tgz -C /usr/local
+OLLAMA_VERSION="v0.5.4"
+curl -fsSL "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64" -o /usr/local/bin/ollama
 chmod +x /usr/local/bin/ollama
-rm -f /tmp/ollama.tgz
 
 # generate initramfs for live boot
 echo "Generating initramfs..."
