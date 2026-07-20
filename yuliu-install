@@ -13,7 +13,6 @@ echo "================ FVAIOS Installer ================"
 echo "WARNING: This will DESTROY ALL DATA on the selected disk."
 echo ""
 
-# list disks
 echo "Available disks:"
 lsblk -d -o NAME,SIZE,TYPE,MOUNTPOINT | grep -E 'disk' || true
 echo ""
@@ -32,7 +31,6 @@ if [ "$CONFIRM" != "YES" ]; then
     exit 0
 fi
 
-# detect boot mode
 if [ -d /sys/firmware/efi ]; then
     BOOT_MODE="uefi"
 else
@@ -78,7 +76,6 @@ fi
 echo "Copying system files..."
 rsync -aAX / /mnt/ --exclude={/dev,/proc,/sys,/tmp,/run,/mnt,/media,/lost+found}
 
-# prepare fstab
 mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/tmp /mnt/run
 mount --bind /dev /mnt/dev
 mount --bind /proc /mnt/proc
@@ -91,7 +88,6 @@ if [ "$BOOT_MODE" = "uefi" ]; then
     echo "UUID=$EFI_UUID /boot/efi vfat defaults 0 0" >> /mnt/etc/fstab
 fi
 
-# install grub
 echo "Installing GRUB..."
 if [ "$BOOT_MODE" = "uefi" ]; then
     chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=FVAIOS --no-nvram
@@ -100,7 +96,6 @@ else
 fi
 chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
 
-# cleanup
 umount -l /mnt/dev
 umount -l /mnt/proc
 umount -l /mnt/sys
