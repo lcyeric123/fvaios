@@ -31,7 +31,7 @@ rc-update add php-fpm81 default
 
 # build llama.cpp static
 echo "Building llama.cpp ..."
-./build_llama.sh
+/build_llama.sh
 
 # generate initramfs for live boot
 echo "Generating initramfs..."
