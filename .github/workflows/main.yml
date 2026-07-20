@@ -1,0 +1,68 @@
+name: Build FvaiOS ISO
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y squashfs-tools xorriso grub-pc-bin grub-efi-amd64-bin mtools wget curl
+      - name: Build llama.cpp binary
+        run: |
+          chmod +x scripts/build_llama.sh
+          ./scripts/build_llama.sh
+      - name: Download Alpine minirootfs
+        run: |
+          wget https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-$(date +%Y.%m)-x86_64.tar.gz
+          mkdir -p rootfs
+          tar -xf alpine-minirootfs-*.tar.gz -C rootfs
+      - name: Install packages into rootfs
+        run: |
+          cat config/packages.txt | xargs sudo chroot rootfs apk add --no-cache
+      - name: Customize root filesystem
+        run: |
+          chmod +x scripts/customize.sh
+          ./scripts/customize.sh
+      - name: Make SquashFS
+        run: |
+          mksquashfs rootfs filesystem.squashfs -comp xz
+      - name: Build bootable ISO
+        run: |
+          mkdir -p iso/boot/grub
+          echo '
+set timeout=5
+menuentry "FvaiOS (Live Memory Mode)" {
+    linux /boot/vmlinuz alpine_dev=live quiet
+    initrd /boot/initramfs
+}
+' > iso/boot/grub/grub.cfg
+          wget https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-standard-x86_64.iso
+          mkdir tmp_iso
+          mount alpine-standard-x86_64.iso tmp_iso
+          cp tmp_iso/boot/vmlinuz iso/boot/
+          cp tmp_iso/boot/initramfs iso/boot/
+          umount tmp_iso
+          mv filesystem.squashfs iso/
+          xorriso -as mkisofs \
+            -isohybrid-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
+            -b boot/grub/grub.img \
+            -no-emul-boot \
+            -boot-load-size 4 \
+            -boot-info-table \
+            -o fvaios.iso \
+            iso/
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fvaios-build
+          path: fvaios.iso
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: fvaios.iso
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
