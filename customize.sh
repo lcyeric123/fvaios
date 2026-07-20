@@ -14,10 +14,13 @@ apk update
 # install zstd first (needed by ollama installer)
 apk add --no-cache zstd
 
-# install packages from list
+# install packages from list (including alpine-base for proper live boot)
 grep -v '^\s*#' /packages.list | grep -v '^\s*$' | while read -r pkg; do
     apk add --no-cache "$pkg"
 done
+
+# install alpine-base if not already included (provides proper init scripts)
+apk add --no-cache alpine-base 2>/dev/null || true
 
 # set hostname
 echo "fvaios" > /etc/hostname
@@ -36,20 +39,47 @@ echo "Installing ollama..."
 curl -fsSL https://ollama.com/install.sh | sh || true
 chmod +x /usr/local/bin/ollama 2>/dev/null || true
 
-# create necessary directories for initramfs
-mkdir -p /media/cdrom /media/usb
+# create necessary directories for live boot
+mkdir -p /media/cdrom /media/usb /media/mmcblk0p1
 
-# generate initramfs for live boot
+# generate proper initramfs for live boot with all required features
 echo "Generating initramfs..."
-cat > /etc/mkinitfs/features.d/fvaios.modules << EOF
-kernel/drivers/cdrom
+cat > /etc/mkinitfs/features.d/fvaios.modules << 'EOF'
+kernel/drivers/cdrom/cdrom.ko
 kernel/drivers/scsi/sr_mod.ko
-kernel/fs/isofs
-kernel/fs/squashfs
+kernel/fs/isofs/isofs.ko
+kernel/fs/squashfs/squashfs.ko
 kernel/drivers/block/loop.ko
+kernel/drivers/ata/ahci.ko
+kernel/drivers/ata/ata_piix.ko
+kernel/drivers/virtio/virtio_blk.ko
+kernel/drivers/virtio/virtio_pci.ko
+kernel/drivers/block/virtio_blk.ko
+kernel/drivers/usb/storage/usb-storage.ko
+kernel/fs/vfat/vfat.ko
+kernel/fs/nls/nls_cp437.ko
+kernel/fs/nls/nls_iso8859-1.ko
 EOF
+
+# Create the features list file
+cat > /tmp/features.list << 'EOF'
+base
+squashfs
+cdrom
+usb
+mmc
+nvme
+virtio
+ext4
+vfat
+fvaios
+EOF
+
 KVER=$(ls /lib/modules | head -1)
-mkinitfs -o /boot/initramfs-lts $KVER
+mkinitfs -F "base squashfs cdrom usb mmc nvme virtio ext4 vfat fvaios" -o /boot/initramfs-lts $KVER
+
+# Verify initramfs was created
+ls -la /boot/initramfs-lts
 
 # clean up
 rm /packages.list /customize.sh
