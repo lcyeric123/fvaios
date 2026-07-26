@@ -8,13 +8,43 @@ ROOTFS_OVERLAY="$SCRIPT_DIR/rootfs"
 ALPINE_VER="3.19"
 MINIROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/releases/x86_64/alpine-minirootfs-${ALPINE_VER}.1-x86_64.tar.gz"
 MINIROOTFS_TAR="alpine-minirootfs-${ALPINE_VER}.1-x86_64.tar.gz"
-ISO_NAME="fvaios-1.0.0-x86_64.iso"
 ROOTFS=""
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 die()       { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# Version management
+get_version() {
+    local ver_file="$SCRIPT_DIR/VERSION"
+    if [ -f "$ver_file" ]; then
+        cat "$ver_file"
+    else
+        echo "1.0.0"
+    fi
+}
+
+bump_version() {
+    local ver_file="$SCRIPT_DIR/VERSION"
+    local current=$(get_version)
+    local major minor patch
+    IFS='.' read -r major minor patch <<< "$current"
+    patch=$((patch + 1))
+    echo "${major}.${minor}.${patch}" > "$ver_file"
+    echo "${major}.${minor}.${patch}"
+}
+
+VERSION=$(get_version)
+ISO_NAME="fvaios-${VERSION}-x86_64.iso"
+GITHUB_TOKEN="${GITHUB_TOKEN:-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}"
+GITHUB_REPO="lcyeric123/fvaios"
+
+# Check if --release flag is passed
+USE_RELEASE=false
+for arg in "$@"; do
+    [ "$arg" = "--release" ] && USE_RELEASE=true
+done
 
 chroot_run() {
     cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf" 2>/dev/null || true
@@ -151,13 +181,11 @@ create_squashfs() {
 create_iso() {
     log_info "Creating ISO with grub-mkrescue..."
 
-    # Create ISO directory structure for grub-mkrescue
     local ISO_DIR="$BUILD_DIR/iso"
     rm -rf "$ISO_DIR"
     mkdir -p "$ISO_DIR/boot/grub"
     mkdir -p "$ISO_DIR/FVAIOS"
 
-    # Find kernel and initramfs
     local KERNEL=$(ls "$ROOTFS/boot/vmlinuz-"* 2>/dev/null | head -1)
     local INITRD=$(ls "$ROOTFS/boot/initramfs-"* 2>/dev/null | head -1)
 
@@ -167,7 +195,6 @@ create_iso() {
 
     cp "$BUILD_DIR/live/rootfs.squashfs" "$ISO_DIR/FVAIOS/"
 
-    # GRUB config
     cat > "$ISO_DIR/boot/grub/grub.cfg" << 'EOF'
 set default=0
 set timeout=5
@@ -190,8 +217,6 @@ menuentry "FVAIOS Live - Verbose" {
 }
 EOF
 
-    # Use grub-mkrescue to create proper bootable ISO
-    # This handles BIOS, UEFI, and hybrid boot correctly
     cd "$BUILD_DIR"
     grub-mkrescue \
         --modules="part_msdos part_gpt iso9660" \
@@ -204,8 +229,53 @@ EOF
     log_info "ISO: $BUILD_DIR/$ISO_NAME ($(du -h "$BUILD_DIR/$ISO_NAME" | cut -f1))"
 }
 
+create_github_release() {
+    if [ "$USE_RELEASE" = false ]; then
+        return
+    fi
+
+    log_info "Creating GitHub release v${VERSION}..."
+
+    # Create release
+    local RELEASE_JSON=$(curl -s -X POST \
+        -H "Authorization: token $GITHUB_TOKEN" \
+        -H "Accept: application/vnd.github.v3+json" \
+        https://api.github.com/repos/$GITHUB_REPO/releases \
+        -d "{\"tag_name\":\"v${VERSION}\",\"name\":\"FVAIOS v${VERSION}\",\"body\":\"## FVAIOS v${VERSION}\n\n### Download\n\\\`wget https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/${ISO_NAME}\\\`\n\n### SHA256\n\\\`$(sha256sum "$BUILD_DIR/$ISO_NAME" | cut -d' ' -f1)\\\`\"}")
+
+    local RELEASE_ID=$(echo "$RELEASE_JSON" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+
+    if [ -z "$RELEASE_ID" ]; then
+        log_warn "Failed to create GitHub release"
+        return
+    fi
+
+    log_info "Release ID: $RELEASE_ID"
+
+    # Upload ISO
+    log_info "Uploading ISO to GitHub release..."
+    local UPLOAD_RESULT=$(curl -s -X POST \
+        -H "Authorization: token $GITHUB_TOKEN" \
+        -H "Accept: application/vnd.github.v3+json" \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary "@$BUILD_DIR/$ISO_NAME" \
+        "https://uploads.github.com/repos/$GITHUB_REPO/releases/$RELEASE_ID/assets?name=$ISO_NAME")
+
+    local STATE=$(echo "$UPLOAD_RESULT" | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+    if [ "$STATE" = "uploaded" ]; then
+        log_info "ISO uploaded successfully!"
+        log_info "Release: https://github.com/$GITHUB_REPO/releases/tag/v${VERSION}"
+    else
+        log_warn "Upload may have failed"
+    fi
+}
+
 main() {
-    log_info "========== FVAIOS Build =========="
+    log_info "========================================="
+    log_info "  FVAIOS Build System v${VERSION}"
+    log_info "========================================="
+
     download_rootfs
     setup_rootfs
     install_packages
@@ -215,8 +285,14 @@ main() {
     generate_initramfs
     create_squashfs
     create_iso
-    log_info "========== BUILD COMPLETE =========="
-    log_info "ISO: $BUILD_DIR/$ISO_NAME"
+
+    log_info ""
+    log_info "========================================="
+    log_info "  BUILD COMPLETE"
+    log_info "  ISO: $BUILD_DIR/$ISO_NAME"
+    log_info "========================================="
+
+    create_github_release
 }
 
 main "$@"
