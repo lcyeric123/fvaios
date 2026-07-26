@@ -15,36 +15,12 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 die()       { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# Version management
-get_version() {
-    local ver_file="$SCRIPT_DIR/VERSION"
-    if [ -f "$ver_file" ]; then
-        cat "$ver_file"
-    else
-        echo "1.0.0"
-    fi
-}
-
-bump_version() {
-    local ver_file="$SCRIPT_DIR/VERSION"
-    local current=$(get_version)
-    local major minor patch
-    IFS='.' read -r major minor patch <<< "$current"
-    patch=$((patch + 1))
-    echo "${major}.${minor}.${patch}" > "$ver_file"
-    echo "${major}.${minor}.${patch}"
-}
-
-VERSION=$(get_version)
+VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "1.0.0")
 ISO_NAME="fvaios-${VERSION}-x86_64.iso"
 GITHUB_TOKEN="${GITHUB_TOKEN:-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}"
 GITHUB_REPO="lcyeric123/fvaios"
-
-# Check if --release flag is passed
 USE_RELEASE=false
-for arg in "$@"; do
-    [ "$arg" = "--release" ] && USE_RELEASE=true
-done
+for arg in "$@"; do [ "$arg" = "--release" ] && USE_RELEASE=true; done
 
 chroot_run() {
     cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf" 2>/dev/null || true
@@ -53,10 +29,7 @@ chroot_run() {
 
 download_rootfs() {
     mkdir -p "$BUILD_DIR"
-    if [ -f "$BUILD_DIR/$MINIROOTFS_TAR" ]; then
-        log_info "Minirootfs cached"
-        return
-    fi
+    [ -f "$BUILD_DIR/$MINIROOTFS_TAR" ] && log_info "Minirootfs cached" && return
     log_info "Downloading alpine-minirootfs..."
     wget -q --show-progress -O "$BUILD_DIR/$MINIROOTFS_TAR" "$MINIROOTFS_URL"
 }
@@ -88,26 +61,11 @@ install_packages() {
             grub grub-bios efibootmgr dosfstools e2fsprogs \
             mkinitfs linux-lts
     '
-
-    # Configure mkinitfs to include necessary modules
-    chroot_run '
-        # Ensure mkinitfs includes live boot modules
-        cat > /etc/mkinitfs/mkinitfs.conf << MKINITFS_CONF
-modules="isofs squashfs loop vfat fat ext4 usb-storage uas sd_mod sr_mod usbcore ehci-hcd xhci-hcd ohci-hcd scsi_mod libata ahci kbd"
-quiet=""
-MKINITFS_CONF
-
-        # Regenerate initramfs with proper modules
-        KVER=$(ls /boot/vmlinuz-* 2>/dev/null | head -1 | sed "s|/boot/vmlinuz-||")
-        if [ -n "$KVER" ]; then
-            mkinitfs -c /etc/mkinitfs.conf -b / "$KVER" 2>/dev/null || true
-        fi
-    '
 }
 
 install_ollama() {
     log_info "Installing ollama..."
-    chroot_run 'curl -fsSL https://ollama.com/install.sh | sh' || log_warn "Ollama install skipped (non-critical)"
+    chroot_run 'curl -fsSL https://ollama.com/install.sh | sh' || log_warn "Ollama install skipped"
 }
 
 configure_system() {
@@ -136,244 +94,6 @@ copy_overlay() {
     ln -sf /usr/local/bin/install "$ROOTFS/usr/bin/install" 2>/dev/null || true
 }
 
-generate_initramfs() {
-    log_info "Generating initramfs..."
-
-    # First, generate Alpine's initramfs with all needed modules
-    chroot_run '
-        KVER=$(ls /boot/vmlinuz-* 2>/dev/null | head -1 | sed "s|/boot/vmlinuz-||")
-        if [ -n "$KVER" ]; then
-            mkinitfs -c /etc/mkinitfs.conf -b / "$KVER" 2>/dev/null || true
-        fi
-    '
-
-    # Now create a custom init script to replace Alpine's default
-    # Alpine's default init looks for apkovl files which we don't have
-    mkdir -p "$WORK_DIR/initrd_tmp"
-
-    cat > "$WORK_DIR/initrd_tmp/init" << 'CUSTOM_INIT'
-#!/bin/sh
-# FVAIOS Live Init Script v8
-
-export PATH=/sbin:/bin:/usr/sbin:/usr/bin
-
-/bin/busybox mkdir -p /proc /sys /dev /tmp /run /media /sysroot
-/bin/busybox --install -s
-
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
-mount -t proc proc /proc
-mount -t devpts devpts /dev/pts
-[ -c /dev/null ] || mknod -m 666 /dev/null c 1 3
-
-# Check for debug mode
-DEBUG=0
-for arg in $(cat /proc/cmdline); do
-    [ "$arg" = "debug" ] && DEBUG=1
-done
-
-if [ "$DEBUG" = "1" ]; then
-    echo ""
-    echo "========================================="
-    echo "  FVAIOS DEBUG MODE"
-    echo "========================================="
-    echo ""
-fi
-
-# Load modules one by one with debug output
-echo "Loading storage modules..."
-for mod in usb-storage uas sd_mod sr_mod scsi_mod libata ahci \
-           usbcore ehci-hcd xhci-hcd ohci-hcd \
-           isofs squashfs loop vfat fat ext4; do
-    if modprobe $mod 2>/dev/null; then
-        [ "$DEBUG" = "1" ] && echo "  [OK] $mod"
-    else
-        [ "$DEBUG" = "1" ] && echo "  [FAIL] $mod"
-    fi
-done
-
-# Trigger mdev multiple times
-echo "/sbin/mdev" > /proc/sys/kernel/hotplug 2>/dev/null
-mdev -s 2>/dev/null
-
-# Wait for USB with periodic mdev triggers
-echo "Waiting for storage devices..."
-for i in 1 2 3 4 5; do
-    sleep 1
-    mdev -s 2>/dev/null
-done
-
-if [ "$DEBUG" = "1" ]; then
-    echo ""
-    echo "=== Loaded modules ==="
-    cat /proc/modules 2>/dev/null
-    echo ""
-    echo "=== USB devices ==="
-    ls /sys/bus/usb/devices/ 2>/dev/null
-    echo ""
-    echo "=== SCSI devices ==="
-    ls /sys/bus/scsi/devices/ 2>/dev/null
-fi
-
-echo ""
-echo "=== /proc/partitions ==="
-cat /proc/partitions
-echo "========================"
-
-# Find FVAIOS rootfs
-BOOT_MEDIA=""
-SQUASH_PATH=""
-
-echo "Scanning for FVAIOS..."
-
-# Try all block devices
-for dev in /dev/sd[a-z] /dev/sd[a-z][0-9] /dev/nvme[0-9]n[0-9]p[0-9]; do
-    [ -b "$dev" ] || continue
-    echo "  Testing $dev..."
-    mkdir -p /media/check
-
-    # Try ISO9660 with different offsets
-    for offset in 0 2048 4096 8192 16384 32768 65536; do
-        if mount -t iso9660 -o ro,loop,offset=$offset "$dev" /media/check 2>/dev/null; then
-            for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs FVAIOS/ROOTFS.SQUASHFS; do
-                if [ -f "/media/check/$p" ]; then
-                    BOOT_MEDIA="/media/check"
-                    SQUASH_PATH="/media/check/$p"
-                    echo "  FOUND: $dev (iso9660 offset=$offset path=$p)"
-                    break 4
-                fi
-            done
-            umount /media/check 2>/dev/null
-        fi
-    done
-
-    # Try direct ISO9660
-    if mount -t iso9660 -o ro "$dev" /media/check 2>/dev/null; then
-        for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs; do
-            if [ -f "/media/check/$p" ]; then
-                BOOT_MEDIA="/media/check"
-                SQUASH_PATH="/media/check/$p"
-                echo "  FOUND: $dev (iso9660 path=$p)"
-                break 4
-            fi
-        done
-        umount /media/check 2>/dev/null
-    fi
-
-    # Try FAT with case-insensitive search
-    if mount -t vfat -o ro "$dev" /media/check 2>/dev/null; then
-        echo "    FAT mounted, searching..."
-        for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs ROOTFS.SQUASHFS rootfs.squashfs; do
-            if [ -f "/media/check/$p" ]; then
-                BOOT_MEDIA="/media/check"
-                SQUASH_PATH="/media/check/$p"
-                echo "  FOUND: $dev (vfat path=$p)"
-                break 4
-            fi
-        done
-        FOUND=$(find /media/check -iname "*squashfs*" 2>/dev/null | head -1)
-        if [ -n "$FOUND" ]; then
-            BOOT_MEDIA="/media/check"
-            SQUASH_PATH="$FOUND"
-            echo "  FOUND: $dev (vfat find=$FOUND)"
-            break 4
-        fi
-        umount /media/check 2>/dev/null
-    fi
-
-    # Try ext4
-    if mount -t ext4 -o ro "$dev" /media/check 2>/dev/null; then
-        if [ -f "/media/check/FVAIOS/rootfs.squashfs" ]; then
-            BOOT_MEDIA="/media/check"
-            SQUASH_PATH="/media/check/FVAIOS/rootfs.squashfs"
-            echo "  FOUND: $dev (ext4)"
-            break 4
-        fi
-        umount /media/check 2>/dev/null
-    fi
-done
-
-# Try CD/DVD
-if [ -z "$SQUASH_PATH" ]; then
-    for dev in /dev/sr0 /dev/sr1; do
-        [ -b "$dev" ] || continue
-        echo "  Testing $dev (CD/DVD)..."
-        mkdir -p /media/check
-        if mount -t iso9660 -o ro "$dev" /media/check 2>/dev/null; then
-            for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs; do
-                if [ -f "/media/check/$p" ]; then
-                    BOOT_MEDIA="/media/check"
-                    SQUASH_PATH="/media/check/$p"
-                    echo "  FOUND: $dev (path=$p)"
-                    break 5
-                fi
-            done
-            umount /media/check 2>/dev/null
-        fi
-    done
-fi
-
-if [ -z "$SQUASH_PATH" ]; then
-    echo ""
-    echo "ERROR: FVAIOS rootfs not found!"
-    echo "Kernel: $(cat /proc/cmdline)"
-    echo ""
-    exec /bin/sh
-fi
-
-echo "Mounting $SQUASH_PATH..."
-mkdir -p /live
-mount -t squashfs -o ro,loop "$SQUASH_PATH" /live
-
-if [ ! -d /live/bin ]; then
-    echo "ERROR: Failed to mount squashfs"
-    exec /bin/sh
-fi
-
-echo "Copying rootfs to RAM..."
-mkdir -p /sysroot
-cp -a /live/* /sysroot/ 2>/dev/null
-
-mkdir -p /sysroot/dev /sysroot/proc /sysroot/sys /sysroot/tmp
-mount --bind /dev /sysroot/dev
-mount --bind /dev/pts /sysroot/dev/pts
-mount -t proc proc /sysroot/proc
-mount -t sysfs sysfs /sysroot/sys
-mount -t tmpfs tmpfs /sysroot/tmp
-cp /etc/resolv.conf /sysroot/etc/resolv.conf 2>/dev/null
-
-echo "FVAIOS ready!"
-exec chroot /sysroot /bin/sh -l
-CUSTOM_INIT
-
-    chmod +x "$WORK_DIR/initrd_tmp/init"
-
-    # Now rebuild initramfs with our custom init
-    INITRD=$(ls "$ROOTFS/boot/initramfs-"* 2>/dev/null | head -1)
-    if [ -n "$INITRD" ]; then
-        log_info "Rebuilding initramfs with custom init..."
-
-        # Extract existing initramfs
-        mkdir -p "$WORK_DIR/initrd_extract"
-        cd "$WORK_DIR/initrd_extract"
-        zcat "$INITRD" | cpio -id 2>/dev/null
-
-        # Replace init script
-        cp "$WORK_DIR/initrd_tmp/init" ./init
-        chmod +x ./init
-
-        # Repack initramfs
-        find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -9 > "$INITRD"
-
-        cd "$SCRIPT_DIR"
-        rm -rf "$WORK_DIR/initrd_extract" "$WORK_DIR/initrd_tmp"
-
-        log_info "Initramfs rebuilt with custom init"
-    else
-        log_warn "No initramfs found, using Alpine default"
-    fi
-}
-
 create_squashfs() {
     log_info "Creating squashfs..."
     mkdir -p "$BUILD_DIR/live"
@@ -383,13 +103,17 @@ create_squashfs() {
 }
 
 create_iso() {
-    log_info "Creating ISO with grub-mkrescue..."
+    log_info "Creating ISO with Alpine-style structure..."
 
     local ISO_DIR="$BUILD_DIR/iso"
     rm -rf "$ISO_DIR"
-    mkdir -p "$ISO_DIR/boot/grub"
-    mkdir -p "$ISO_DIR/FVAIOS"
 
+    # Create Alpine-style directory structure
+    mkdir -p "$ISO_DIR/boot/grub"
+    mkdir -p "$ISO_DIR/apks/x86_64"
+    mkdir -p "$ISO_DIR/media/fvaios"
+
+    # Find kernel and initramfs
     local KERNEL=$(ls "$ROOTFS/boot/vmlinuz-"* 2>/dev/null | head -1)
     local INITRD=$(ls "$ROOTFS/boot/initramfs-"* 2>/dev/null | head -1)
 
@@ -397,8 +121,16 @@ create_iso() {
     cp "$KERNEL" "$ISO_DIR/boot/vmlinuz"
     [ -n "$INITRD" ] && cp "$INITRD" "$ISO_DIR/boot/initramfs"
 
-    cp "$BUILD_DIR/live/rootfs.squashfs" "$ISO_DIR/FVAIOS/"
+    # Copy squashfs to media directory (Alpine looks here)
+    cp "$BUILD_DIR/live/rootfs.squashfs" "$ISO_DIR/media/fvaios/"
 
+    # Create .boot_repository file (REQUIRED by Alpine init)
+    touch "$ISO_DIR/apks/.boot_repository"
+
+    # Create .alpine-release
+    echo "${ALPINE_VER}.1" > "$ISO_DIR/.alpine-release"
+
+    # GRUB config - use Alpine's boot parameters
     cat > "$ISO_DIR/boot/grub/grub.cfg" << 'EOF'
 set default=0
 set timeout=5
@@ -410,7 +142,7 @@ menuentry "FVAIOS Live" {
     initrd /boot/initramfs
 }
 
-menuentry "FVAIOS Live - Debug (show modules)" {
+menuentry "FVAIOS Live - Debug" {
     linux /boot/vmlinuz modprobe.blacklist=pcspkr,snd_pcsp debug
     initrd /boot/initramfs
 }
@@ -421,6 +153,7 @@ menuentry "FVAIOS Live - Text Mode" {
 }
 EOF
 
+    # Use grub-mkrescue
     cd "$BUILD_DIR"
     grub-mkrescue \
         --modules="part_msdos part_gpt iso9660" \
@@ -434,69 +167,42 @@ EOF
 }
 
 create_github_release() {
-    if [ "$USE_RELEASE" = false ]; then
-        return
-    fi
+    [ "$USE_RELEASE" = false ] && return
 
     log_info "Creating GitHub release v${VERSION}..."
 
-    # Create release
     local RELEASE_JSON=$(curl -s -X POST \
         -H "Authorization: token $GITHUB_TOKEN" \
         -H "Accept: application/vnd.github.v3+json" \
         https://api.github.com/repos/$GITHUB_REPO/releases \
-        -d "{\"tag_name\":\"v${VERSION}\",\"name\":\"FVAIOS v${VERSION}\",\"body\":\"## FVAIOS v${VERSION}\"}")
+        -d "{\"tag_name\":\"v${VERSION}\",\"name\":\"FVAIOS v${VERSION}\"}")
 
     local RELEASE_ID=$(echo "$RELEASE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
 
-    if [ -z "$RELEASE_ID" ]; then
-        log_warn "Failed to create GitHub release"
-        log_warn "Response: $RELEASE_JSON"
-        return
-    fi
+    [ -z "$RELEASE_ID" ] && log_warn "Failed to create release" && return
 
-    log_info "Release ID: $RELEASE_ID"
-
-    # Upload ISO
-    log_info "Uploading ISO to GitHub release..."
-    local UPLOAD_RESULT=$(curl -s -X POST \
+    log_info "Uploading ISO..."
+    curl -s -X POST \
         -H "Authorization: token $GITHUB_TOKEN" \
         -H "Accept: application/vnd.github.v3+json" \
         -H "Content-Type: application/octet-stream" \
         --data-binary "@$BUILD_DIR/$ISO_NAME" \
-        "https://uploads.github.com/repos/$GITHUB_REPO/releases/$RELEASE_ID/assets?name=$ISO_NAME")
+        "https://uploads.github.com/repos/$GITHUB_REPO/releases/$RELEASE_ID/assets?name=$ISO_NAME" > /dev/null
 
-    local STATE=$(echo "$UPLOAD_RESULT" | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-    if [ "$STATE" = "uploaded" ]; then
-        log_info "ISO uploaded successfully!"
-        log_info "Release: https://github.com/$GITHUB_REPO/releases/tag/v${VERSION}"
-    else
-        log_warn "Upload may have failed"
-    fi
+    log_info "Release: https://github.com/$GITHUB_REPO/releases/tag/v${VERSION}"
 }
 
 main() {
-    log_info "========================================="
-    log_info "  FVAIOS Build System v${VERSION}"
-    log_info "========================================="
-
+    log_info "========== FVAIOS Build v${VERSION} =========="
     download_rootfs
     setup_rootfs
     install_packages
     install_ollama
     configure_system
     copy_overlay
-    generate_initramfs
     create_squashfs
     create_iso
-
-    log_info ""
-    log_info "========================================="
-    log_info "  BUILD COMPLETE"
-    log_info "  ISO: $BUILD_DIR/$ISO_NAME"
-    log_info "========================================="
-
+    log_info "========== BUILD COMPLETE =========="
     create_github_release
 }
 
