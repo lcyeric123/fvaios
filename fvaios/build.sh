@@ -92,7 +92,10 @@ install_packages() {
     # Configure mkinitfs to include necessary modules
     chroot_run '
         # Ensure mkinitfs includes live boot modules
-        sed -i "s|^modules=.*|modules=\"isofs squashfs loop vfat fat ext4 usb-storage sr_mod sd-mod kbd\"|" /etc/mkinitfs/mkinitfs.conf 2>/dev/null || true
+        cat > /etc/mkinitfs/mkinitfs.conf << MKINITFS_CONF
+modules="isofs squashfs loop vfat fat ext4 usb-storage uas sd_mod sr_mod usbcore ehci-hcd xhci-hcd ohci-hcd scsi_mod libata ahci kbd"
+quiet=""
+MKINITFS_CONF
 
         # Regenerate initramfs with proper modules
         KVER=$(ls /boot/vmlinuz-* 2>/dev/null | head -1 | sed "s|/boot/vmlinuz-||")
@@ -150,7 +153,7 @@ generate_initramfs() {
 
     cat > "$WORK_DIR/initrd_tmp/init" << 'CUSTOM_INIT'
 #!/bin/sh
-# FVAIOS Live Init Script v3
+# FVAIOS Live Init Script v4
 
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
 
@@ -164,109 +167,72 @@ mount -t proc proc /proc
 mount -t devpts devpts /dev/pts
 
 [ -c /dev/null ] || mknod -m 666 /dev/null c 1 3
-[ -c /dev/kmsg ] || mknod -m 660 /dev/kmsg c 1 11
 
-# Load ALL USB and storage related modules
-echo "Loading storage drivers..."
-for mod in \
-    usb-storage uas \
-    sd_mod sr_mod \
-    ahci libata \
-    scsi_mod \
-    vfat fat \
-    isofs \
-    loop \
-    squashfs \
-    ext4 \
-    usbcore \
-    ehci-hcd \
-    xhci-hcd \
-    ohci-hcd \
-    usbhid; do
-    modprobe $mod 2>/dev/null
-done
-
-# Wait longer for USB devices to enumerate
-echo "Waiting for USB devices..."
-sleep 5
-
-# Trigger udev/mdev to create device nodes
+# Trigger mdev to create device nodes
 echo "/sbin/mdev" > /proc/sys/kernel/hotplug 2>/dev/null
 mdev -s 2>/dev/null
 
-# Wait a bit more
-sleep 2
+# Wait for devices
+echo "Waiting for storage devices..."
+sleep 3
 
-echo "=== Block devices found ==="
-ls -la /dev/sd* /dev/sr* /dev/nvme* /dev/loop* 2>/dev/null
-echo "==========================="
+# List all block devices
+echo "=== Detected block devices ==="
+cat /proc/partitions
+echo "==============================="
 
-# The key insight: when booting from USB, the USB device IS the boot media
-# We need to find it and extract rootfs.squashfs from it
-
+# Find the boot device - when dd'ing ISO to USB, the whole device is the ISO
 BOOT_MEDIA=""
 
-# Strategy 1: Try all /dev/sd* devices (USB drives)
-echo "Strategy 1: Scanning /dev/sd* devices..."
-for dev in /dev/sda /dev/sdb /dev/sdc /dev/sdd; do
-    [ -b "$dev" ] || continue
-    
-    # Skip the root device
-    ROOT_DEV=$(cat /proc/mounts | grep " / " | head -1 | cut -d' ' -f1)
-    case "$ROOT_DEV" in
-        /dev/loop*) ;;  # OK to check sd devices
-        "$dev") continue ;;  # Skip if this is root
-    esac
-    
+# Try all block devices
+echo "Scanning for FVAIOS rootfs..."
+
+# First try /dev/sd* (USB drives)
+for dev in $(grep -E "^ *8 " /proc/partitions | awk '{print $4}' | sed 's/^/\/dev\//'); do
     echo "  Checking $dev..."
     mkdir -p /media/check
     
-    # Try mounting as ISO9660
+    # Try as ISO9660 (most likely for dd'd ISO)
     if mount -t iso9660 -o ro "$dev" /media/check 2>/dev/null; then
         if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
             BOOT_MEDIA="/media/check"
-            echo "  FOUND on $dev (ISO9660)"
+            echo "  FOUND: FVAIOS on $dev (ISO9660)"
             break
         fi
         umount /media/check 2>/dev/null
     fi
     
-    # Try partitions
-    for part in 1 2 3 4; do
-        [ -b "${dev}${part}" ] || continue
-        echo "  Checking ${dev}${part}..."
-        
-        if mount -t iso9660 -o ro "${dev}${part}" /media/check 2>/dev/null; then
-            if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
-                BOOT_MEDIA="/media/check"
-                echo "  FOUND on ${dev}${part} (ISO9660)"
-                break 2
-            fi
-            umount /media/check 2>/dev/null
+    # Try as vfat
+    if mount -t vfat -o ro "$dev" /media/check 2>/dev/null; then
+        if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
+            BOOT_MEDIA="/media/check"
+            echo "  FOUND: FVAIOS on $dev (FAT)"
+            break
         fi
-        
-        if mount -t vfat -o ro "${dev}${part}" /media/check 2>/dev/null; then
-            if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
-                BOOT_MEDIA="/media/check"
-                echo "  FOUND on ${dev}${part} (FAT)"
-                break 2
-            fi
-            umount /media/check 2>/dev/null
+        umount /media/check 2>/dev/null
+    fi
+    
+    # Try without specifying filesystem
+    if mount -o ro "$dev" /media/check 2>/dev/null; then
+        if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
+            BOOT_MEDIA="/media/check"
+            echo "  FOUND: FVAIOS on $dev"
+            break
         fi
-    done
+        umount /media/check 2>/dev/null
+    fi
 done
 
-# Strategy 2: Try CD/DVD
+# If not found, try CD/DVD
 if [ -z "$BOOT_MEDIA" ]; then
-    echo "Strategy 2: Scanning CD/DVD devices..."
     for dev in /dev/sr0 /dev/sr1; do
         [ -b "$dev" ] || continue
-        echo "  Checking $dev..."
+        echo "  Checking $dev (CD/DVD)..."
         mkdir -p /media/check
         if mount -t iso9660 -o ro "$dev" /media/check 2>/dev/null; then
             if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
                 BOOT_MEDIA="/media/check"
-                echo "  FOUND on $dev (CD/DVD)"
+                echo "  FOUND: FVAIOS on $dev"
                 break
             fi
             umount /media/check 2>/dev/null
@@ -274,137 +240,46 @@ if [ -z "$BOOT_MEDIA" ]; then
     done
 fi
 
-# Strategy 3: Check if squashfs is embedded in the boot device using losetup
-if [ -z "$BOOT_MEDIA" ]; then
-    echo "Strategy 3: Trying losetup to find embedded ISO..."
-    # Find the device we booted from
-    BOOT_DEV=""
-    for arg in $(cat /proc/cmdline); do
-        case "$arg" in
-            Boot=*) BOOT_DEV="${arg#Boot=}" ;;
-        esac
-    done
-    
-    if [ -z "$BOOT_DEV" ] || [ ! -b "$BOOT_DEV" ]; then
-        # Try to guess from GRUB
-        # The boot device is usually the first USB/sd device
-        for dev in /dev/sda /dev/sdb /dev/sdc; do
-            [ -b "$dev" ] || continue
-            BOOT_DEV="$dev"
-            break
-        done
-    fi
-    
-    if [ -n "$BOOT_DEV" ] && [ -b "$BOOT_DEV" ]; then
-        echo "  Boot device: $BOOT_DEV"
-        
-        # Try to find the squashfs directly on the raw device
-        # When ISO is dd'd to USB, the squashfs is at a specific offset
-        echo "  Searching for squashfs signature on $BOOT_DEV..."
-        
-        # Look for the squashfs magic bytes (hsqs or shsq)
-        SQUASH_OFFSET=$(dd if="$BOOT_DEV" bs=1 count=4 2>/dev/null | od -A n -t x1 | head -1)
-        
-        # Try mounting the whole device as different filesystems
-        mkdir -p /media/check
-        for fstype in iso9660 vfat ext4; do
-            if mount -t "$fstype" -o ro "$BOOT_DEV" /media/check 2>/dev/null; then
-                if [ -f /media/check/FVAIOS/rootfs.squashfs ] || [ -f /media/check/boot/vmlinuz ]; then
-                    BOOT_MEDIA="/media/check"
-                    echo "  FOUND on $BOOT_DEV ($fstype)"
-                    break
-                fi
-                umount /media/check 2>/dev/null
-            fi
-        done
-    fi
-fi
-
-# Strategy 4: Look for squashfs anywhere
-if [ -z "$BOOT_MEDIA" ]; then
-    echo "Strategy 4: Searching all devices for rootfs.squashfs..."
-    for dev in /dev/sd* /dev/sr*; do
-        [ -b "$dev" ] || continue
-        ROOT_DEV=$(cat /proc/mounts | grep " / " | head -1 | cut -d' ' -f1)
-        [ "$dev" = "$ROOT_DEV" ] && continue
-        
-        mkdir -p /media/check
-        if mount -o ro "$dev" /media/check 2>/dev/null; then
-            if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
-                BOOT_MEDIA="/media/check"
-                echo "  FOUND on $dev"
-                break
-            fi
-            umount /media/check 2>/dev/null
-        fi
-    done
-fi
-
-# Final check
 if [ -z "$BOOT_MEDIA" ]; then
     echo ""
-    echo "╔══════════════════════════════════════════════════════╗"
-    echo "║  ERROR: FVAIOS boot media not found!                ║"
-    echo "╚══════════════════════════════════════════════════════╝"
+    echo "ERROR: No block devices detected!"
     echo ""
-    echo "Debug info:"
-    echo "  Kernel command line: $(cat /proc/cmdline)"
-    echo "  Mounted filesystems:"
-    cat /proc/mounts
+    echo "This usually means USB storage drivers are missing."
     echo ""
-    echo "  Available devices:"
-    ls -la /dev/ 2>/dev/null
+    echo "Kernel command line: $(cat /proc/cmdline)"
     echo ""
     exec /bin/sh
 fi
 
 echo ""
-echo "╔══════════════════════════════════════════════════════╗"
-echo "║  FVAIOS rootfs found!                               ║"
-echo "╚══════════════════════════════════════════════════════╝"
+echo "=== Mounting FVAIOS rootfs ==="
 
-# Mount squashfs
-echo "Mounting squashfs rootfs..."
 mkdir -p /live
 mount -t squashfs -o ro,loop "$BOOT_MEDIA/FVAIOS/rootfs.squashfs" /live
 
 if [ ! -d /live/bin ]; then
-    echo "ERROR: Failed to mount rootfs"
+    echo "ERROR: Failed to mount squashfs"
     exec /bin/sh
 fi
 
-# Setup overlay for write access
-echo "Setting up overlay filesystem..."
-mkdir -p /overlay/upper /overlay/work
-mount -t tmpfs tmpfs /overlay
-
-if mount -t overlay overlay -o lowerdir=/live,upperdir=/overlay/upper,workdir=/overlay/work /sysroot 2>/dev/null; then
-    echo "Overlay mounted"
-else
-    echo "Copying rootfs to RAM..."
-    mkdir -p /sysroot
-    cp -a /live/* /sysroot/ 2>/dev/null
-fi
+# Copy rootfs to RAM for better performance
+echo "Copying rootfs to RAM (this may take a moment)..."
+mkdir -p /sysroot
+cp -a /live/* /sysroot/ 2>/dev/null
 
 # Mount system filesystems
-echo "Preparing system..."
-mkdir -p /sysroot/dev /sysroot/proc /sysroot/sys /sysroot/tmp /sysroot/run
+echo "Setting up system..."
+mkdir -p /sysroot/dev /sysroot/proc /sysroot/sys /sysroot/tmp
 mount --bind /dev /sysroot/dev
 mount --bind /dev/pts /sysroot/dev/pts
 mount -t proc proc /sysroot/proc
 mount -t sysfs sysfs /sysroot/sys
 mount -t tmpfs tmpfs /sysroot/tmp
 
-# Copy DNS
 cp /etc/resolv.conf /sysroot/etc/resolv.conf 2>/dev/null
 
 echo ""
-echo "╔══════════════════════════════════════════════════════╗"
-echo "║  FVAIOS Live System Ready                           ║"
-echo "╚══════════════════════════════════════════════════════╝"
-echo ""
-
-# Switch to new root
+echo "FVAIOS ready! Starting shell..."
 exec chroot /sysroot /bin/sh -l
 CUSTOM_INIT
 
