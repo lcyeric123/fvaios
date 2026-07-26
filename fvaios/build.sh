@@ -153,7 +153,7 @@ generate_initramfs() {
 
     cat > "$WORK_DIR/initrd_tmp/init" << 'CUSTOM_INIT'
 #!/bin/sh
-# FVAIOS Live Init Script v7
+# FVAIOS Live Init Script v8
 
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
 
@@ -166,31 +166,73 @@ mount -t proc proc /proc
 mount -t devpts devpts /dev/pts
 [ -c /dev/null ] || mknod -m 666 /dev/null c 1 3
 
-echo "Loading drivers..."
-for mod in usb-storage uas sd_mod sr_mod scsi_mod libata ahci usbcore ehci-hcd xhci-hcd ohci-hcd isofs squashfs loop vfat fat; do
-    modprobe $mod 2>/dev/null
+# Check for debug mode
+DEBUG=0
+for arg in $(cat /proc/cmdline); do
+    [ "$arg" = "debug" ] && DEBUG=1
 done
 
+if [ "$DEBUG" = "1" ]; then
+    echo ""
+    echo "========================================="
+    echo "  FVAIOS DEBUG MODE"
+    echo "========================================="
+    echo ""
+fi
+
+# Load modules one by one with debug output
+echo "Loading storage modules..."
+for mod in usb-storage uas sd_mod sr_mod scsi_mod libata ahci \
+           usbcore ehci-hcd xhci-hcd ohci-hcd \
+           isofs squashfs loop vfat fat ext4; do
+    if modprobe $mod 2>/dev/null; then
+        [ "$DEBUG" = "1" ] && echo "  [OK] $mod"
+    else
+        [ "$DEBUG" = "1" ] && echo "  [FAIL] $mod"
+    fi
+done
+
+# Trigger mdev multiple times
 echo "/sbin/mdev" > /proc/sys/kernel/hotplug 2>/dev/null
 mdev -s 2>/dev/null
-sleep 3
-mdev -s 2>/dev/null
-sleep 2
 
+# Wait for USB with periodic mdev triggers
+echo "Waiting for storage devices..."
+for i in 1 2 3 4 5; do
+    sleep 1
+    mdev -s 2>/dev/null
+done
+
+if [ "$DEBUG" = "1" ]; then
+    echo ""
+    echo "=== Loaded modules ==="
+    cat /proc/modules 2>/dev/null
+    echo ""
+    echo "=== USB devices ==="
+    ls /sys/bus/usb/devices/ 2>/dev/null
+    echo ""
+    echo "=== SCSI devices ==="
+    ls /sys/bus/scsi/devices/ 2>/dev/null
+fi
+
+echo ""
 echo "=== /proc/partitions ==="
 cat /proc/partitions
 echo "========================"
 
+# Find FVAIOS rootfs
 BOOT_MEDIA=""
 SQUASH_PATH=""
 
 echo "Scanning for FVAIOS..."
 
-for dev in /dev/sd[a-z]; do
+# Try all block devices
+for dev in /dev/sd[a-z] /dev/sd[a-z][0-9] /dev/nvme[0-9]n[0-9]p[0-9]; do
     [ -b "$dev" ] || continue
     echo "  Testing $dev..."
     mkdir -p /media/check
 
+    # Try ISO9660 with different offsets
     for offset in 0 2048 4096 8192 16384 32768 65536; do
         if mount -t iso9660 -o ro,loop,offset=$offset "$dev" /media/check 2>/dev/null; then
             for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs FVAIOS/ROOTFS.SQUASHFS; do
@@ -198,62 +240,74 @@ for dev in /dev/sd[a-z]; do
                     BOOT_MEDIA="/media/check"
                     SQUASH_PATH="/media/check/$p"
                     echo "  FOUND: $dev (iso9660 offset=$offset path=$p)"
-                    break 3
+                    break 4
                 fi
             done
             umount /media/check 2>/dev/null
         fi
     done
 
+    # Try direct ISO9660
     if mount -t iso9660 -o ro "$dev" /media/check 2>/dev/null; then
         for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs; do
             if [ -f "/media/check/$p" ]; then
                 BOOT_MEDIA="/media/check"
                 SQUASH_PATH="/media/check/$p"
                 echo "  FOUND: $dev (iso9660 path=$p)"
-                break 3
+                break 4
             fi
         done
         umount /media/check 2>/dev/null
     fi
 
-    for fstype in vfat ext4; do
-        if mount -t "$fstype" -o ro "$dev" /media/check 2>/dev/null; then
-            echo "    $fstype mounted, listing contents..."
-            ls -la /media/check/ 2>/dev/null
-            for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs ROOTFS.SQUASHFS rootfs.squashfs; do
-                if [ -f "/media/check/$p" ]; then
-                    BOOT_MEDIA="/media/check"
-                    SQUASH_PATH="/media/check/$p"
-                    echo "  FOUND: $dev ($fstype path=$p)"
-                    break 3
-                fi
-            done
-            # Search recursively
-            FOUND=$(find /media/check -iname "*squashfs*" 2>/dev/null | head -1)
-            if [ -n "$FOUND" ]; then
+    # Try FAT with case-insensitive search
+    if mount -t vfat -o ro "$dev" /media/check 2>/dev/null; then
+        echo "    FAT mounted, searching..."
+        for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs ROOTFS.SQUASHFS rootfs.squashfs; do
+            if [ -f "/media/check/$p" ]; then
                 BOOT_MEDIA="/media/check"
-                SQUASH_PATH="$FOUND"
-                echo "  FOUND: $dev ($fstype find=$FOUND)"
-                break 3
+                SQUASH_PATH="/media/check/$p"
+                echo "  FOUND: $dev (vfat path=$p)"
+                break 4
             fi
-            umount /media/check 2>/dev/null
+        done
+        FOUND=$(find /media/check -iname "*squashfs*" 2>/dev/null | head -1)
+        if [ -n "$FOUND" ]; then
+            BOOT_MEDIA="/media/check"
+            SQUASH_PATH="$FOUND"
+            echo "  FOUND: $dev (vfat find=$FOUND)"
+            break 4
         fi
-    done
+        umount /media/check 2>/dev/null
+    fi
+
+    # Try ext4
+    if mount -t ext4 -o ro "$dev" /media/check 2>/dev/null; then
+        if [ -f "/media/check/FVAIOS/rootfs.squashfs" ]; then
+            BOOT_MEDIA="/media/check"
+            SQUASH_PATH="/media/check/FVAIOS/rootfs.squashfs"
+            echo "  FOUND: $dev (ext4)"
+            break 4
+        fi
+        umount /media/check 2>/dev/null
+    fi
 done
 
-if [ -z "$BOOT_MEDIA" ]; then
+# Try CD/DVD
+if [ -z "$SQUASH_PATH" ]; then
     for dev in /dev/sr0 /dev/sr1; do
         [ -b "$dev" ] || continue
         echo "  Testing $dev (CD/DVD)..."
         mkdir -p /media/check
         if mount -t iso9660 -o ro "$dev" /media/check 2>/dev/null; then
-            if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
-                BOOT_MEDIA="/media/check"
-                SQUASH_PATH="$BOOT_MEDIA/FVAIOS/rootfs.squashfs"
-                echo "  FOUND: $dev"
-                break
-            fi
+            for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs; do
+                if [ -f "/media/check/$p" ]; then
+                    BOOT_MEDIA="/media/check"
+                    SQUASH_PATH="/media/check/$p"
+                    echo "  FOUND: $dev (path=$p)"
+                    break 5
+                fi
+            done
             umount /media/check 2>/dev/null
         fi
     done
@@ -356,18 +410,13 @@ menuentry "FVAIOS Live" {
     initrd /boot/initramfs
 }
 
+menuentry "FVAIOS Live - Debug (show modules)" {
+    linux /boot/vmlinuz modprobe.blacklist=pcspkr,snd_pcsp debug
+    initrd /boot/initramfs
+}
+
 menuentry "FVAIOS Live - Text Mode" {
     linux /boot/vmlinuz modprobe.blacklist=pcspkr,snd_pcsp console=ttyS0,115200
-    initrd /boot/initramfs
-}
-
-menuentry "FVAIOS Live - Verbose" {
-    linux /boot/vmlinuz modprobe.blacklist=pcspkr,snd_pcsp
-    initrd /boot/initramfs
-}
-
-menuentry "FVAIOS Live - Debug" {
-    linux /boot/vmlinuz modprobe.blacklist=pcspkr,snd_pcsp debug
     initrd /boot/initramfs
 }
 EOF
