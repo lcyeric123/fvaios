@@ -193,33 +193,49 @@ for dev in /dev/sd[a-z]; do
 
     for offset in 0 2048 4096 8192 16384 32768 65536; do
         if mount -t iso9660 -o ro,loop,offset=$offset "$dev" /media/check 2>/dev/null; then
-            if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
-                BOOT_MEDIA="/media/check"
-                SQUASH_PATH="$BOOT_MEDIA/FVAIOS/rootfs.squashfs"
-                echo "  FOUND: $dev (offset=$offset)"
-                break 2
-            fi
+            for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs FVAIOS/ROOTFS.SQUASHFS; do
+                if [ -f "/media/check/$p" ]; then
+                    BOOT_MEDIA="/media/check"
+                    SQUASH_PATH="/media/check/$p"
+                    echo "  FOUND: $dev (iso9660 offset=$offset path=$p)"
+                    break 3
+                fi
+            done
             umount /media/check 2>/dev/null
         fi
     done
 
     if mount -t iso9660 -o ro "$dev" /media/check 2>/dev/null; then
-        if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
-            BOOT_MEDIA="/media/check"
-            SQUASH_PATH="$BOOT_MEDIA/FVAIOS/rootfs.squashfs"
-            echo "  FOUND: $dev (direct)"
-            break
-        fi
+        for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs; do
+            if [ -f "/media/check/$p" ]; then
+                BOOT_MEDIA="/media/check"
+                SQUASH_PATH="/media/check/$p"
+                echo "  FOUND: $dev (iso9660 path=$p)"
+                break 3
+            fi
+        done
         umount /media/check 2>/dev/null
     fi
 
     for fstype in vfat ext4; do
         if mount -t "$fstype" -o ro "$dev" /media/check 2>/dev/null; then
-            if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
+            echo "    $fstype mounted, listing contents..."
+            ls -la /media/check/ 2>/dev/null
+            for p in FVAIOS/rootfs.squashfs fvaios/rootfs.squashfs ROOTFS.SQUASHFS rootfs.squashfs; do
+                if [ -f "/media/check/$p" ]; then
+                    BOOT_MEDIA="/media/check"
+                    SQUASH_PATH="/media/check/$p"
+                    echo "  FOUND: $dev ($fstype path=$p)"
+                    break 3
+                fi
+            done
+            # Search recursively
+            FOUND=$(find /media/check -iname "*squashfs*" 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
                 BOOT_MEDIA="/media/check"
-                SQUASH_PATH="$BOOT_MEDIA/FVAIOS/rootfs.squashfs"
-                echo "  FOUND: $dev ($fstype)"
-                break 2
+                SQUASH_PATH="$FOUND"
+                echo "  FOUND: $dev ($fstype find=$FOUND)"
+                break 3
             fi
             umount /media/check 2>/dev/null
         fi
