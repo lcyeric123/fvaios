@@ -241,12 +241,13 @@ create_github_release() {
         -H "Authorization: token $GITHUB_TOKEN" \
         -H "Accept: application/vnd.github.v3+json" \
         https://api.github.com/repos/$GITHUB_REPO/releases \
-        -d "{\"tag_name\":\"v${VERSION}\",\"name\":\"FVAIOS v${VERSION}\",\"body\":\"## FVAIOS v${VERSION}\n\n### Download\n\\\`wget https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/${ISO_NAME}\\\`\n\n### SHA256\n\\\`$(sha256sum "$BUILD_DIR/$ISO_NAME" | cut -d' ' -f1)\\\`\"}")
+        -d "{\"tag_name\":\"v${VERSION}\",\"name\":\"FVAIOS v${VERSION}\",\"body\":\"## FVAIOS v${VERSION}\"}")
 
-    local RELEASE_ID=$(echo "$RELEASE_JSON" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+    local RELEASE_ID=$(echo "$RELEASE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
 
     if [ -z "$RELEASE_ID" ]; then
         log_warn "Failed to create GitHub release"
+        log_warn "Response: $RELEASE_JSON"
         return
     fi
 
