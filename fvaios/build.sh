@@ -17,7 +17,6 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 die()       { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 chroot_run() {
-    # Copy DNS config
     cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf" 2>/dev/null || true
     chroot "$ROOTFS" /bin/sh -c "$1"
 }
@@ -69,33 +68,18 @@ install_ollama() {
 configure_system() {
     log_info "Configuring system..."
     chroot_run '
-        # Root password
         echo "root:fvaios" | chpasswd
-
-        # SSH
         sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config 2>/dev/null || true
-
-        # Sudoers
         echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
-
-        # User
         adduser -D -s /bin/sh fvaios 2>/dev/null || true
         echo "fvaios:fvaios" | chpasswd
         usermod -aG wheel fvaios 2>/dev/null || true
-
-        # Hostname
         echo "fvaios" > /etc/hostname
-
-        # Timezone
         echo "UTC" > /etc/timezone
-
-        # Services
         rc-update add nginx default 2>/dev/null || true
         rc-update add php-fpm81 default 2>/dev/null || true
         rc-update add sshd default 2>/dev/null || true
         rc-update add networking boot 2>/dev/null || true
-
-        # Clean
         apk cache clean 2>/dev/null || true
     '
 }
@@ -110,13 +94,11 @@ copy_overlay() {
 generate_initramfs() {
     log_info "Generating initramfs..."
     chroot_run '
-        # Find kernel version
         KVER=$(ls /boot/vmlinuz-* 2>/dev/null | head -1 | sed "s|/boot/vmlinuz-||")
         if [ -n "$KVER" ]; then
             mkinitfs -c /etc/mkinitfs.conf -b / "$KVER" 2>/dev/null || true
         fi
 
-        # Fallback: create minimal initramfs if mkinitfs failed
         INITRD=$(ls /boot/initramfs-* 2>/dev/null | head -1)
         if [ -z "$INITRD" ]; then
             echo "Creating minimal initramfs..."
@@ -128,21 +110,17 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
 mount -t tmpfs tmpfs /tmp
-
 echo "FVAIOS Live" > /etc/issue
-
 for dev in /dev/sr0 /dev/cdrom /dev/sda /dev/sdb /dev/nvme0n1; do
     [ -b "$dev" ] || continue
     mount -t iso9660 -o ro "$dev" /media 2>/dev/null || continue
     [ -f /media/FVAIOS/rootfs.squashfs ] && break
     umount /media 2>/dev/null
 done
-
 if [ ! -f /media/FVAIOS/rootfs.squashfs ]; then
     echo "ERROR: Live media not found"
     exec /bin/sh
 fi
-
 mkdir -p /live /mnt
 mount -t squashfs -o ro,loop /media/FVAIOS/rootfs.squashfs /live
 mount -t tmpfs tmpfs /mnt
@@ -171,11 +149,12 @@ create_squashfs() {
 }
 
 create_iso() {
-    log_info "Creating ISO..."
+    log_info "Creating ISO with grub-mkrescue..."
+
+    # Create ISO directory structure for grub-mkrescue
     local ISO_DIR="$BUILD_DIR/iso"
     rm -rf "$ISO_DIR"
-    mkdir -p "$ISO_DIR/boot/grub/i386-pc"
-    mkdir -p "$ISO_DIR/boot/grub/x86_64-efi"
+    mkdir -p "$ISO_DIR/boot/grub"
     mkdir -p "$ISO_DIR/FVAIOS"
 
     # Find kernel and initramfs
@@ -192,6 +171,8 @@ create_iso() {
     cat > "$ISO_DIR/boot/grub/grub.cfg" << 'EOF'
 set default=0
 set timeout=5
+set gfxmode=auto
+insmod all_video
 
 menuentry "FVAIOS Live" {
     linux /boot/vmlinuz modprobe.blacklist=pcspkr,snd_pcsp quiet
@@ -209,46 +190,16 @@ menuentry "FVAIOS Live - Verbose" {
 }
 EOF
 
-    # GRUB modules
-    local GRUB_I386="/usr/lib/grub/i386-pc"
-    local GRUB_EFI="/usr/lib/grub/x86_64-efi"
-    [ -d "$GRUB_I386" ] && cp "$GRUB_I386"/*.mod "$ISO_DIR/boot/grub/i386-pc/" 2>/dev/null || true
-    [ -d "$GRUB_I386" ] && cp "$GRUB_I386"/*.lst "$ISO_DIR/boot/grub/i386-pc/" 2>/dev/null || true
-    [ -d "$GRUB_EFI" ] && cp "$GRUB_EFI"/*.mod "$ISO_DIR/boot/grub/x86_64-efi/" 2>/dev/null || true
-    [ -d "$GRUB_EFI" ] && cp "$GRUB_EFI"/*.lst "$ISO_DIR/boot/grub/x86_64-efi/" 2>/dev/null || true
+    # Use grub-mkrescue to create proper bootable ISO
+    # This handles BIOS, UEFI, and hybrid boot correctly
+    cd "$BUILD_DIR"
+    grub-mkrescue \
+        --modules="part_msdos part_gpt iso9660" \
+        -o "$BUILD_DIR/$ISO_NAME" \
+        "$ISO_DIR" \
+        2>&1
 
-    # BIOS core.img
-    grub-mkimage -O i386-pc \
-        -o "$ISO_DIR/boot/grub/i386-pc/core.img" \
-        -p "(hd0,msdos1)/boot/grub" \
-        -c "$ISO_DIR/boot/grub/grub.cfg" \
-        iso9660 biosdisk part_msdos part_gpt normal configfile linux reboot
-
-    [ -f "$GRUB_I386/boot.img" ] && cp "$GRUB_I386/boot.img" "$ISO_DIR/boot/grub/i386-pc/boot.img"
-
-    # EFI core.efi
-    grub-mkimage -O x86_64-efi \
-        -o "$ISO_DIR/boot/grub/x86_64-efi/core.efi" \
-        -p "/boot/grub" \
-        -c "$ISO_DIR/boot/grub/grub.cfg" \
-        iso9660 normal configfile linux reboot
-
-    # Create ISO
-    xorriso -as mkisofs \
-        -iso-level 3 \
-        -full-iso9660-filenames \
-        -volid "FVAIOS" \
-        -output "$BUILD_DIR/$ISO_NAME" \
-        -eltorito-boot boot/grub/i386-pc/core.img \
-            -no-emul-boot \
-            -boot-load-size 4 \
-            -boot-info-table \
-            --grub2-boot-info \
-        -eltorito-boot boot/grub/x86_64-efi/core.efi \
-            -no-emul-boot \
-            -isohybrid-gpt-basdat \
-        -append_partition 2 0xef "$ISO_DIR/boot/grub/x86_64-efi/core.efi" \
-        "$ISO_DIR"
+    cd "$SCRIPT_DIR"
 
     log_info "ISO: $BUILD_DIR/$ISO_NAME ($(du -h "$BUILD_DIR/$ISO_NAME" | cut -f1))"
 }
