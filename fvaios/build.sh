@@ -135,152 +135,200 @@ copy_overlay() {
 
 generate_initramfs() {
     log_info "Generating initramfs..."
+
+    # First, generate Alpine's initramfs with all needed modules
     chroot_run '
         KVER=$(ls /boot/vmlinuz-* 2>/dev/null | head -1 | sed "s|/boot/vmlinuz-||")
         if [ -n "$KVER" ]; then
             mkinitfs -c /etc/mkinitfs.conf -b / "$KVER" 2>/dev/null || true
         fi
+    '
 
-        INITRD=$(ls /boot/initramfs-* 2>/dev/null | head -1)
-        if [ -z "$INITRD" ]; then
-            echo "Creating minimal initramfs..."
-            mkdir -p /tmp/ir
-            cat > /tmp/ir/init << "INEOF"
+    # Now create a custom init script to replace Alpine's default
+    # Alpine's default init looks for apkovl files which we don't have
+    mkdir -p "$WORK_DIR/initrd_tmp"
+
+    cat > "$WORK_DIR/initrd_tmp/init" << 'CUSTOM_INIT'
 #!/bin/sh
+# FVAIOS Live Init Script
+
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
 
 # Mount essential filesystems
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev
-mount -t tmpfs tmpfs /tmp
+/bin/busybox mkdir -p /proc /sys /dev /tmp /run
+/bin/busybox --install -s
+
+mount -t sysfs -o noexec,nosuid,nodev sysfs /sys
+mount -t devtmpfs -o exec,nosuid,mode=0755 devtmpfs /dev 2>/dev/null \
+    || mount -t tmpfs -o exec,nosuid,mode=0755 tmpfs /dev
+mount -t proc -o noexec,nosuid,nodev proc /proc
+mount -t devpts -o gid=5,mode=0620 devpts /dev/pts
+mount -t tmpfs -o nodev,nosuid,noexec shm /dev/shm
+
+# Create necessary device nodes
+[ -c /dev/null ] || mknod -m 666 /dev/null c 1 3
+[ -c /dev/kmsg ] || mknod -m 660 /dev/kmsg c 1 11
+[ -c /dev/ptmx ] || mknod -m 666 /dev/ptmx c 5 2
+[ -d /dev/pts ] || mkdir -m 755 /dev/pts
 
 # Load required kernel modules
-modprobe isofs 2>/dev/null || true
-modprobe squashfs 2>/dev/null || true
-modprobe loop 2>/dev/null || true
-modprobe vfat 2>/dev/null || true
-modprobe fat 2>/dev/null || true
-modprobe ext4 2>/dev/null || true
-modprobe usb-storage 2>/dev/null || true
-modprobe sr_mod 2>/dev/null || true
+echo "Loading kernel modules..."
+modprobe isofs 2>/dev/null
+modprobe squashfs 2>/dev/null
+modprobe loop 2>/dev/null
+modprobe vfat 2>/dev/null
+modprobe fat 2>/dev/null
+modprobe ext4 2>/dev/null
+modprobe usb-storage 2>/dev/null
+modprobe sr_mod 2>/dev/null
+modprobe sd_mod 2>/dev/null
+modprobe ahci 2>/dev/null
 
-# Wait for devices to settle
+# Wait for devices
 sleep 2
 
-# Function to find and mount boot media
-find_boot_media() {
-    # Try CD/DVD first
-    for dev in /dev/sr0 /dev/sr1 /dev/cdrom; do
-        [ -b "$dev" ] || continue
-        echo "Trying $dev..."
-        mount -t iso9660 -o ro "$dev" /media 2>/dev/null || continue
-        if [ -f /media/FVAIOS/rootfs.squashfs ]; then
-            echo "Found boot media on $dev"
-            return 0
-        fi
-        # Check for boot directory structure
-        if [ -f /media/boot/vmlinuz ]; then
-            echo "Found boot media on $dev"
-            return 0
-        fi
-        umount /media 2>/dev/null
-    done
-
-    # Try USB and other block devices
-    for dev in /dev/sd[a-z] /dev/sd[a-z][0-9] /dev/nvme[0-9]n[0-9]p[0-9] /dev/mmcblk[0-9]p[0-9]; do
-        [ -b "$dev" ] || continue
-        echo "Trying $dev..."
-        mount -t iso9660 -o ro "$dev" /media 2>/dev/null || continue
-        if [ -f /media/FVAIOS/rootfs.squashfs ]; then
-            echo "Found boot media on $dev"
-            return 0
-        fi
-        if [ -f /media/boot/vmlinuz ]; then
-            echo "Found boot media on $dev"
-            return 0
-        fi
-        umount /media 2>/dev/null
-    done
-
-    # Try FAT/exFAT for USB
-    for dev in /dev/sd[a-z]1 /dev/sd[a-z]2 /dev/nvme[0-9]n1p1; do
-        [ -b "$dev" ] || continue
-        echo "Trying $dev (FAT)..."
-        mount -t vfat -o ro "$dev" /media 2>/dev/null || continue
-        if [ -f /media/FVAIOS/rootfs.squashfs ]; then
-            echo "Found boot media on $dev"
-            return 0
-        fi
-        umount /media 2>/dev/null
-    done
-
-    return 1
-}
-
 # Find boot media
-if ! find_boot_media; then
+echo "Searching for boot media..."
+BOOT_MEDIA=""
+
+# Try CD/DVD devices
+for dev in /dev/sr0 /dev/sr1; do
+    [ -b "$dev" ] || continue
+    echo "Checking $dev..."
+    mkdir -p /media
+    if mount -t iso9660 -o ro "$dev" /media 2>/dev/null; then
+        if [ -f /media/FVAIOS/rootfs.squashfs ] || [ -f /media/boot/vmlinuz ]; then
+            BOOT_MEDIA="/media"
+            echo "Found boot media on $dev"
+            break
+        fi
+        umount /media 2>/dev/null
+    fi
+done
+
+# Try USB and other devices if CD/DVD not found
+if [ -z "$BOOT_MEDIA" ]; then
+    for dev in /dev/sda /dev/sdb /dev/sdc /dev/sdd /dev/nvme0n1; do
+        [ -b "$dev" ] || continue
+        # Try partitions 1-4
+        for part in 1 2 3 4; do
+            [ -b "${dev}${part}" ] || continue
+            echo "Checking ${dev}${part}..."
+            mkdir -p /media
+            # Try iso9660 first
+            if mount -t iso9660 -o ro "${dev}${part}" /media 2>/dev/null; then
+                if [ -f /media/FVAIOS/rootfs.squashfs ]; then
+                    BOOT_MEDIA="/media"
+                    echo "Found boot media on ${dev}${part}"
+                    break 2
+                fi
+                umount /media 2>/dev/null
+            fi
+            # Try vfat
+            if mount -t vfat -o ro "${dev}${part}" /media 2>/dev/null; then
+                if [ -f /media/FVAIOS/rootfs.squashfs ]; then
+                    BOOT_MEDIA="/media"
+                    echo "Found boot media on ${dev}${part}"
+                    break 2
+                fi
+                umount /media 2>/dev/null
+            fi
+            # Try ext4
+            if mount -t ext4 -o ro "${dev}${part}" /media 2>/dev/null; then
+                if [ -f /media/FVAIOS/rootfs.squashfs ]; then
+                    BOOT_MEDIA="/media"
+                    echo "Found boot media on ${dev}${part}"
+                    break 2
+                fi
+                umount /media 2>/dev/null
+            fi
+        done
+    done
+fi
+
+if [ -z "$BOOT_MEDIA" ]; then
     echo ""
-    echo "========================================="
-    echo "  ERROR: Boot media not found!"
-    echo "========================================="
+    echo "============================================"
+    echo "  ERROR: FVAIOS boot media not found!"
+    echo "============================================"
     echo ""
     echo "Available block devices:"
-    ls -la /dev/sd* /dev/nvme* /dev/sr* 2>/dev/null || echo "No devices found"
+    cat /proc/partitions 2>/dev/null || ls /dev/sd* /dev/nvme* /dev/sr* 2>/dev/null
     echo ""
     echo "Dropping to emergency shell..."
     echo "Type 'exit' to reboot."
     exec /bin/sh
 fi
 
-# Check for squashfs
-if [ -f /media/FVAIOS/rootfs.squashfs ]; then
-    echo "Mounting squashfs rootfs..."
-    mkdir -p /live
-    mount -t squashfs -o ro,loop /media/FVAIOS/rootfs.squashfs /live
-elif [ -f /media/boot/vmlinuz ]; then
-    # Direct boot from media (non-squashfs)
-    echo "Direct boot mode..."
-    mkdir -p /live
-    cp -a /media/* /live/ 2>/dev/null || true
-fi
+# Mount the rootfs
+echo "Mounting FVAIOS root filesystem..."
+mkdir -p /live /overlay/upper /overlay/work
+
+mount -t squashfs -o ro,loop "$BOOT_MEDIA/FVAIOS/rootfs.squashfs" /live
 
 # Create overlay for write access
-echo "Setting up overlay filesystem..."
-mkdir -p /overlay/upper /overlay/work /overlay/lower
 mount -t tmpfs tmpfs /overlay
+mkdir -p /overlay/upper /overlay/work
 
-# Use overlayfs if available, otherwise copy
 if mount -t overlay overlay -o lowerdir=/live,upperdir=/overlay/upper,workdir=/overlay/work /mnt 2>/dev/null; then
-    echo "Overlay mounted successfully"
+    echo "Overlay filesystem mounted"
 else
     echo "Overlay not available, copying rootfs..."
     mkdir -p /mnt
-    cp -a /live/* /mnt/ 2>/dev/null || true
+    cp -a /live/* /mnt/ 2>/dev/null
 fi
 
 # Bind mount essential filesystems
-echo "Mounting system filesystems..."
-mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/tmp /mnt/run
+echo "Preparing system..."
+mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/tmp /mnt/run /mnt/media
 mount --bind /dev /mnt/dev
 mount --bind /dev/pts /mnt/dev/pts
 mount -t proc proc /mnt/proc
 mount -t sysfs sysfs /mnt/sys
 mount -t tmpfs tmpfs /mnt/tmp
 
-# Copy resolv.conf for networking
-cp /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null || true
+# Copy resolv.conf
+cp /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null
 
-echo "Switching to root filesystem..."
+# Setup mdev in new root
+echo "/sbin/mdev" > /mnt/proc/sys/kernel/hotplug 2>/dev/null
+
+echo ""
+echo "============================================"
+echo "  FVAIOS Live System Ready"
+echo "============================================"
+echo ""
+
+# Switch to new root
 exec chroot /mnt /bin/sh -l
-INEOF
-            chmod +x /tmp/ir/init
-            cd /tmp/ir
-            find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -9 > /boot/initramfs-lts
-            cd /
-            rm -rf /tmp/ir
-        fi
-    '
+CUSTOM_INIT
+
+    chmod +x "$WORK_DIR/initrd_tmp/init"
+
+    # Now rebuild initramfs with our custom init
+    INITRD=$(ls "$ROOTFS/boot/initramfs-"* 2>/dev/null | head -1)
+    if [ -n "$INITRD" ]; then
+        log_info "Rebuilding initramfs with custom init..."
+
+        # Extract existing initramfs
+        mkdir -p "$WORK_DIR/initrd_extract"
+        cd "$WORK_DIR/initrd_extract"
+        zcat "$INITRD" | cpio -id 2>/dev/null
+
+        # Replace init script
+        cp "$WORK_DIR/initrd_tmp/init" ./init
+        chmod +x ./init
+
+        # Repack initramfs
+        find . -print0 | cpio --null -o --format=newc 2>/dev/null | gzip -9 > "$INITRD"
+
+        cd "$SCRIPT_DIR"
+        rm -rf "$WORK_DIR/initrd_extract" "$WORK_DIR/initrd_tmp"
+
+        log_info "Initramfs rebuilt with custom init"
+    else
+        log_warn "No initramfs found, using Alpine default"
+    fi
 }
 
 create_squashfs() {
