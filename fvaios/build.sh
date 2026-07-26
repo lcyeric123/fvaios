@@ -173,107 +173,146 @@ mount -t tmpfs -o nodev,nosuid,noexec shm /dev/shm
 
 # Load required kernel modules
 echo "Loading kernel modules..."
-modprobe isofs 2>/dev/null
-modprobe squashfs 2>/dev/null
-modprobe loop 2>/dev/null
-modprobe vfat 2>/dev/null
-modprobe fat 2>/dev/null
-modprobe ext4 2>/dev/null
-modprobe usb-storage 2>/dev/null
-modprobe sr_mod 2>/dev/null
-modprobe sd_mod 2>/dev/null
-modprobe ahci 2>/dev/null
-
-# Wait for devices
-sleep 2
-
-# Find boot media
-echo "Searching for boot media..."
-BOOT_MEDIA=""
-
-# Try CD/DVD devices
-for dev in /dev/sr0 /dev/sr1; do
-    [ -b "$dev" ] || continue
-    echo "Checking $dev..."
-    mkdir -p /media
-    if mount -t iso9660 -o ro "$dev" /media 2>/dev/null; then
-        if [ -f /media/FVAIOS/rootfs.squashfs ] || [ -f /media/boot/vmlinuz ]; then
-            BOOT_MEDIA="/media"
-            echo "Found boot media on $dev"
-            break
-        fi
-        umount /media 2>/dev/null
-    fi
+for mod in isofs squashfs loop vfat fat ext4 usb-storage sr_mod sd_mod ahci uas; do
+    modprobe $mod 2>/dev/null
 done
 
-# Try USB and other devices if CD/DVD not found
+# Wait for devices to settle
+echo "Waiting for devices..."
+sleep 3
+
+# Detect which device we booted from (the initramfs came from there)
+BOOT_DEV=""
+for cmdline_dev in $(cat /proc/cmdline | tr ' ' '\n' | grep -E "^Boot=" | cut -d= -f2); do
+    BOOT_DEV="$cmdline_dev"
+    break
+done
+
+# If not in cmdline, try to find it from /proc/mounts
+if [ -z "$BOOT_DEV" ]; then
+    BOOT_DEV=$(cat /proc/mounts | head -1 | awk '{print $1}')
+fi
+
+echo "Boot device detected: $BOOT_DEV"
+
+# Find boot media containing FVAIOS
+echo "Searching for FVAIOS rootfs..."
+BOOT_MEDIA=""
+
+# Function to check if a path contains FVAIOS
+check_fvaios() {
+    local path="$1"
+    if [ -f "$path/FVAIOS/rootfs.squashfs" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# First, try the device we booted from
+if [ -n "$BOOT_DEV" ] && [ -b "$BOOT_DEV" ]; then
+    echo "Checking boot device $BOOT_DEV..."
+    mkdir -p /media
+
+    # Try different filesystem types on the boot device itself
+    for fstype in iso9660 vfat ext4; do
+        if mount -t "$fstype" -o ro "$BOOT_DEV" /media 2>/dev/null; then
+            if check_fvaios /media; then
+                BOOT_MEDIA="/media"
+                echo "Found FVAIOS on boot device $BOOT_DEV ($fstype)"
+                break
+            fi
+            umount /media 2>/dev/null
+        fi
+    done
+fi
+
+# Try all block devices if not found yet
 if [ -z "$BOOT_MEDIA" ]; then
-    for dev in /dev/sda /dev/sdb /dev/sdc /dev/sdd /dev/nvme0n1; do
+    for dev in $(ls /dev/sd* /dev/nvme* 2>/dev/null); do
         [ -b "$dev" ] || continue
-        # Try partitions 1-4
-        for part in 1 2 3 4; do
-            [ -b "${dev}${part}" ] || continue
-            echo "Checking ${dev}${part}..."
-            mkdir -p /media
-            # Try iso9660 first
-            if mount -t iso9660 -o ro "${dev}${part}" /media 2>/dev/null; then
-                if [ -f /media/FVAIOS/rootfs.squashfs ]; then
+        [ "$dev" = "$BOOT_DEV" ] && continue
+
+        echo "Checking $dev..."
+        mkdir -p /media
+
+        for fstype in iso9660 vfat ext4; do
+            if mount -t "$fstype" -o ro "$dev" /media 2>/dev/null; then
+                if check_fvaios /media; then
                     BOOT_MEDIA="/media"
-                    echo "Found boot media on ${dev}${part}"
-                    break 2
-                fi
-                umount /media 2>/dev/null
-            fi
-            # Try vfat
-            if mount -t vfat -o ro "${dev}${part}" /media 2>/dev/null; then
-                if [ -f /media/FVAIOS/rootfs.squashfs ]; then
-                    BOOT_MEDIA="/media"
-                    echo "Found boot media on ${dev}${part}"
-                    break 2
-                fi
-                umount /media 2>/dev/null
-            fi
-            # Try ext4
-            if mount -t ext4 -o ro "${dev}${part}" /media 2>/dev/null; then
-                if [ -f /media/FVAIOS/rootfs.squashfs ]; then
-                    BOOT_MEDIA="/media"
-                    echo "Found boot media on ${dev}${part}"
+                    echo "Found FVAIOS on $dev ($fstype)"
                     break 2
                 fi
                 umount /media 2>/dev/null
             fi
         done
+
+        # Also try partitions
+        for part in 1 2 3 4; do
+            [ -b "${dev}${part}" ] || continue
+            echo "  Checking ${dev}${part}..."
+            for fstype in iso9660 vfat ext4; do
+                if mount -t "$fstype" -o ro "${dev}${part}" /media 2>/dev/null; then
+                    if check_fvaios /media; then
+                        BOOT_MEDIA="/media"
+                        echo "Found FVAIOS on ${dev}${part} ($fstype)"
+                        break 3
+                    fi
+                    umount /media 2>/dev/null
+                fi
+            done
+        done
+    done
+fi
+
+# Try CD/DVD as last resort
+if [ -z "$BOOT_MEDIA" ]; then
+    for dev in /dev/sr0 /dev/sr1; do
+        [ -b "$dev" ] || continue
+        echo "Checking $dev (CD/DVD)..."
+        mkdir -p /media
+        if mount -t iso9660 -o ro "$dev" /media 2>/dev/null; then
+            if check_fvaios /media; then
+                BOOT_MEDIA="/media"
+                echo "Found FVAIOS on $dev"
+                break
+            fi
+            umount /media 2>/dev/null
+        fi
     done
 fi
 
 if [ -z "$BOOT_MEDIA" ]; then
     echo ""
     echo "============================================"
-    echo "  ERROR: FVAIOS boot media not found!"
+    echo "  ERROR: FVAIOS rootfs not found!"
     echo "============================================"
     echo ""
     echo "Available block devices:"
-    cat /proc/partitions 2>/dev/null || ls /dev/sd* /dev/nvme* /dev/sr* 2>/dev/null
+    cat /proc/partitions
+    echo ""
+    echo "Mount points:"
+    cat /proc/mounts
     echo ""
     echo "Dropping to emergency shell..."
-    echo "Type 'exit' to reboot."
     exec /bin/sh
 fi
 
 # Mount the rootfs
+echo ""
 echo "Mounting FVAIOS root filesystem..."
-mkdir -p /live /overlay/upper /overlay/work
+mkdir -p /live
 
 mount -t squashfs -o ro,loop "$BOOT_MEDIA/FVAIOS/rootfs.squashfs" /live
 
 # Create overlay for write access
-mount -t tmpfs tmpfs /overlay
+echo "Setting up overlay..."
 mkdir -p /overlay/upper /overlay/work
+mount -t tmpfs tmpfs /overlay
 
 if mount -t overlay overlay -o lowerdir=/live,upperdir=/overlay/upper,workdir=/overlay/work /mnt 2>/dev/null; then
-    echo "Overlay filesystem mounted"
+    echo "Overlay mounted"
 else
-    echo "Overlay not available, copying rootfs..."
+    echo "Overlay failed, copying rootfs..."
     mkdir -p /mnt
     cp -a /live/* /mnt/ 2>/dev/null
 fi
@@ -289,9 +328,6 @@ mount -t tmpfs tmpfs /mnt/tmp
 
 # Copy resolv.conf
 cp /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null
-
-# Setup mdev in new root
-echo "/sbin/mdev" > /mnt/proc/sys/kernel/hotplug 2>/dev/null
 
 echo ""
 echo "============================================"
