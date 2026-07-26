@@ -88,6 +88,18 @@ install_packages() {
             grub grub-bios efibootmgr dosfstools e2fsprogs \
             mkinitfs linux-lts
     '
+
+    # Configure mkinitfs to include necessary modules
+    chroot_run '
+        # Ensure mkinitfs includes live boot modules
+        sed -i "s|^modules=.*|modules=\"isofs squashfs loop vfat fat ext4 usb-storage sr_mod sd-mod kbd\"|" /etc/mkinitfs/mkinitfs.conf 2>/dev/null || true
+
+        # Regenerate initramfs with proper modules
+        KVER=$(ls /boot/vmlinuz-* 2>/dev/null | head -1 | sed "s|/boot/vmlinuz-||")
+        if [ -n "$KVER" ]; then
+            mkinitfs -c /etc/mkinitfs.conf -b / "$KVER" 2>/dev/null || true
+        fi
+    '
 }
 
 install_ollama() {
@@ -136,29 +148,130 @@ generate_initramfs() {
             cat > /tmp/ir/init << "INEOF"
 #!/bin/sh
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+
+# Mount essential filesystems
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
 mount -t tmpfs tmpfs /tmp
-echo "FVAIOS Live" > /etc/issue
-for dev in /dev/sr0 /dev/cdrom /dev/sda /dev/sdb /dev/nvme0n1; do
-    [ -b "$dev" ] || continue
-    mount -t iso9660 -o ro "$dev" /media 2>/dev/null || continue
-    [ -f /media/FVAIOS/rootfs.squashfs ] && break
-    umount /media 2>/dev/null
-done
-if [ ! -f /media/FVAIOS/rootfs.squashfs ]; then
-    echo "ERROR: Live media not found"
+
+# Load required kernel modules
+modprobe isofs 2>/dev/null || true
+modprobe squashfs 2>/dev/null || true
+modprobe loop 2>/dev/null || true
+modprobe vfat 2>/dev/null || true
+modprobe fat 2>/dev/null || true
+modprobe ext4 2>/dev/null || true
+modprobe usb-storage 2>/dev/null || true
+modprobe sr_mod 2>/dev/null || true
+
+# Wait for devices to settle
+sleep 2
+
+# Function to find and mount boot media
+find_boot_media() {
+    # Try CD/DVD first
+    for dev in /dev/sr0 /dev/sr1 /dev/cdrom; do
+        [ -b "$dev" ] || continue
+        echo "Trying $dev..."
+        mount -t iso9660 -o ro "$dev" /media 2>/dev/null || continue
+        if [ -f /media/FVAIOS/rootfs.squashfs ]; then
+            echo "Found boot media on $dev"
+            return 0
+        fi
+        # Check for boot directory structure
+        if [ -f /media/boot/vmlinuz ]; then
+            echo "Found boot media on $dev"
+            return 0
+        fi
+        umount /media 2>/dev/null
+    done
+
+    # Try USB and other block devices
+    for dev in /dev/sd[a-z] /dev/sd[a-z][0-9] /dev/nvme[0-9]n[0-9]p[0-9] /dev/mmcblk[0-9]p[0-9]; do
+        [ -b "$dev" ] || continue
+        echo "Trying $dev..."
+        mount -t iso9660 -o ro "$dev" /media 2>/dev/null || continue
+        if [ -f /media/FVAIOS/rootfs.squashfs ]; then
+            echo "Found boot media on $dev"
+            return 0
+        fi
+        if [ -f /media/boot/vmlinuz ]; then
+            echo "Found boot media on $dev"
+            return 0
+        fi
+        umount /media 2>/dev/null
+    done
+
+    # Try FAT/exFAT for USB
+    for dev in /dev/sd[a-z]1 /dev/sd[a-z]2 /dev/nvme[0-9]n1p1; do
+        [ -b "$dev" ] || continue
+        echo "Trying $dev (FAT)..."
+        mount -t vfat -o ro "$dev" /media 2>/dev/null || continue
+        if [ -f /media/FVAIOS/rootfs.squashfs ]; then
+            echo "Found boot media on $dev"
+            return 0
+        fi
+        umount /media 2>/dev/null
+    done
+
+    return 1
+}
+
+# Find boot media
+if ! find_boot_media; then
+    echo ""
+    echo "========================================="
+    echo "  ERROR: Boot media not found!"
+    echo "========================================="
+    echo ""
+    echo "Available block devices:"
+    ls -la /dev/sd* /dev/nvme* /dev/sr* 2>/dev/null || echo "No devices found"
+    echo ""
+    echo "Dropping to emergency shell..."
+    echo "Type 'exit' to reboot."
     exec /bin/sh
 fi
-mkdir -p /live /mnt
-mount -t squashfs -o ro,loop /media/FVAIOS/rootfs.squashfs /live
-mount -t tmpfs tmpfs /mnt
-cp -a /live/* /mnt/
-mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/tmp
+
+# Check for squashfs
+if [ -f /media/FVAIOS/rootfs.squashfs ]; then
+    echo "Mounting squashfs rootfs..."
+    mkdir -p /live
+    mount -t squashfs -o ro,loop /media/FVAIOS/rootfs.squashfs /live
+elif [ -f /media/boot/vmlinuz ]; then
+    # Direct boot from media (non-squashfs)
+    echo "Direct boot mode..."
+    mkdir -p /live
+    cp -a /media/* /live/ 2>/dev/null || true
+fi
+
+# Create overlay for write access
+echo "Setting up overlay filesystem..."
+mkdir -p /overlay/upper /overlay/work /overlay/lower
+mount -t tmpfs tmpfs /overlay
+
+# Use overlayfs if available, otherwise copy
+if mount -t overlay overlay -o lowerdir=/live,upperdir=/overlay/upper,workdir=/overlay/work /mnt 2>/dev/null; then
+    echo "Overlay mounted successfully"
+else
+    echo "Overlay not available, copying rootfs..."
+    mkdir -p /mnt
+    cp -a /live/* /mnt/ 2>/dev/null || true
+fi
+
+# Bind mount essential filesystems
+echo "Mounting system filesystems..."
+mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/tmp /mnt/run
 mount --bind /dev /mnt/dev
+mount --bind /dev/pts /mnt/dev/pts
 mount -t proc proc /mnt/proc
 mount -t sysfs sysfs /mnt/sys
+mount -t tmpfs tmpfs /mnt/tmp
+
+# Copy resolv.conf for networking
+cp /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null || true
+
+echo "Switching to root filesystem..."
 exec chroot /mnt /bin/sh -l
 INEOF
             chmod +x /tmp/ir/init
