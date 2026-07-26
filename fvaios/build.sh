@@ -153,7 +153,7 @@ generate_initramfs() {
 
     cat > "$WORK_DIR/initrd_tmp/init" << 'CUSTOM_INIT'
 #!/bin/sh
-# FVAIOS Live Init Script v4
+# FVAIOS Live Init Script v5
 
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
 
@@ -165,65 +165,77 @@ mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || mount -t tmpfs tmpfs /dev
 mount -t proc proc /proc
 mount -t devpts devpts /dev/pts
-
 [ -c /dev/null ] || mknod -m 666 /dev/null c 1 3
 
-# Trigger mdev to create device nodes
+# Load ALL storage-related kernel modules
+echo "Loading storage drivers..."
+modprobe usb-storage 2>/dev/null
+modprobe uas 2>/dev/null
+modprobe sd_mod 2>/dev/null
+modprobe sr_mod 2>/dev/null
+modprobe scsi_mod 2>/dev/null
+modprobe libata 2>/dev/null
+modprobe ahci 2>/dev/null
+modprobe usbcore 2>/dev/null
+modprobe ehci-hcd 2>/dev/null
+modprobe xhci-hcd 2>/dev/null
+modprobe ohci-hcd 2>/dev/null
+modprobe isofs 2>/dev/null
+modprobe squashfs 2>/dev/null
+modprobe loop 2>/dev/null
+modprobe vfat 2>/dev/null
+modprobe fat 2>/dev/null
+
+# Trigger mdev
 echo "/sbin/mdev" > /proc/sys/kernel/hotplug 2>/dev/null
 mdev -s 2>/dev/null
 
-# Wait for devices
-echo "Waiting for storage devices..."
-sleep 3
+# Wait for USB enumeration
+echo "Waiting for USB devices to initialize..."
+sleep 5
+mdev -s 2>/dev/null
+sleep 2
 
-# List all block devices
-echo "=== Detected block devices ==="
+# Debug output
+echo "=== /proc/partitions ==="
 cat /proc/partitions
-echo "==============================="
+echo "========================"
 
-# Find the boot device - when dd'ing ISO to USB, the whole device is the ISO
+# Find boot media
 BOOT_MEDIA=""
 
-# Try all block devices
 echo "Scanning for FVAIOS rootfs..."
 
-# First try /dev/sd* (USB drives)
-for dev in $(grep -E "^ *8 " /proc/partitions | awk '{print $4}' | sed 's/^/\/dev\//'); do
+# Try /dev/sd* devices
+for dev in /dev/sda /dev/sdb /dev/sdc /dev/sdd; do
+    [ -b "$dev" ] || continue
     echo "  Checking $dev..."
     mkdir -p /media/check
-    
-    # Try as ISO9660 (most likely for dd'd ISO)
+
     if mount -t iso9660 -o ro "$dev" /media/check 2>/dev/null; then
         if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
             BOOT_MEDIA="/media/check"
-            echo "  FOUND: FVAIOS on $dev (ISO9660)"
+            echo "  FOUND on $dev (ISO9660)"
             break
         fi
         umount /media/check 2>/dev/null
     fi
-    
-    # Try as vfat
-    if mount -t vfat -o ro "$dev" /media/check 2>/dev/null; then
-        if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
-            BOOT_MEDIA="/media/check"
-            echo "  FOUND: FVAIOS on $dev (FAT)"
-            break
+
+    for part in 1 2 3 4; do
+        [ -b "${dev}${part}" ] || continue
+        echo "    Checking ${dev}${part}..."
+        if mount -t iso9660 -o ro "${dev}${part}" /media/check 2>/dev/null; then
+            if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
+                BOOT_MEDIA="/media/check"
+                echo "  FOUND on ${dev}${part} (ISO9660)"
+                break 2
+            fi
+            umount /media/check 2>/dev/null
         fi
-        umount /media/check 2>/dev/null
-    fi
-    
-    # Try without specifying filesystem
-    if mount -o ro "$dev" /media/check 2>/dev/null; then
-        if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
-            BOOT_MEDIA="/media/check"
-            echo "  FOUND: FVAIOS on $dev"
-            break
-        fi
-        umount /media/check 2>/dev/null
-    fi
+    done
 done
 
-# If not found, try CD/DVD
+# Try CD/DVD
 if [ -z "$BOOT_MEDIA" ]; then
     for dev in /dev/sr0 /dev/sr1; do
         [ -b "$dev" ] || continue
@@ -232,7 +244,7 @@ if [ -z "$BOOT_MEDIA" ]; then
         if mount -t iso9660 -o ro "$dev" /media/check 2>/dev/null; then
             if [ -f /media/check/FVAIOS/rootfs.squashfs ]; then
                 BOOT_MEDIA="/media/check"
-                echo "  FOUND: FVAIOS on $dev"
+                echo "  FOUND on $dev"
                 break
             fi
             umount /media/check 2>/dev/null
@@ -242,44 +254,32 @@ fi
 
 if [ -z "$BOOT_MEDIA" ]; then
     echo ""
-    echo "ERROR: No block devices detected!"
-    echo ""
-    echo "This usually means USB storage drivers are missing."
-    echo ""
-    echo "Kernel command line: $(cat /proc/cmdline)"
+    echo "ERROR: No boot media found!"
+    echo "Kernel: $(cat /proc/cmdline)"
     echo ""
     exec /bin/sh
 fi
 
-echo ""
-echo "=== Mounting FVAIOS rootfs ==="
-
+# Mount squashfs
+echo "Mounting FVAIOS rootfs..."
 mkdir -p /live
 mount -t squashfs -o ro,loop "$BOOT_MEDIA/FVAIOS/rootfs.squashfs" /live
 
-if [ ! -d /live/bin ]; then
-    echo "ERROR: Failed to mount squashfs"
-    exec /bin/sh
-fi
-
-# Copy rootfs to RAM for better performance
-echo "Copying rootfs to RAM (this may take a moment)..."
+# Copy to RAM
+echo "Copying rootfs to RAM..."
 mkdir -p /sysroot
 cp -a /live/* /sysroot/ 2>/dev/null
 
-# Mount system filesystems
-echo "Setting up system..."
+# Setup filesystems
 mkdir -p /sysroot/dev /sysroot/proc /sysroot/sys /sysroot/tmp
 mount --bind /dev /sysroot/dev
 mount --bind /dev/pts /sysroot/dev/pts
 mount -t proc proc /sysroot/proc
 mount -t sysfs sysfs /sysroot/sys
 mount -t tmpfs tmpfs /sysroot/tmp
-
 cp /etc/resolv.conf /sysroot/etc/resolv.conf 2>/dev/null
 
-echo ""
-echo "FVAIOS ready! Starting shell..."
+echo "FVAIOS ready!"
 exec chroot /sysroot /bin/sh -l
 CUSTOM_INIT
 
