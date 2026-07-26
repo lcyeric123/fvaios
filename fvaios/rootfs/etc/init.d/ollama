@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+
+description="Ollama AI Runtime"
+
+depend() {
+    need net
+    after firewall
+    keyword -stop
+}
+
+start() {
+    ebegin "Starting Ollama"
+    start-stop-daemon --start --background \
+        --make-pidfile --pidfile /run/ollama.pid \
+        --exec /usr/bin/ollama -- serve
+    eend $?
+}
+
+stop() {
+    ebegin "Stopping Ollama"
+    start-stop-daemon --stop --pidfile /run/ollama.pid
+    eend $?
+}

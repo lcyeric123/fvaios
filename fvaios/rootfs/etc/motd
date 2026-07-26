@@ -1,0 +1,24 @@
+#!/bin/sh
+# FVAIOS MOTD Banner
+
+cat << 'EOF'
+
+  ████████╗██╗  ██╗██╗ ██████╗    ███████╗
+  ╚══██╔══╝╚██╗██╔╝██║██╔════╝    ██╔════╝
+     ██║    ╚███╔╝ ██║██║         ███████╗
+     ██║    ██╔██╗ ██║██║         ╚════██║
+     ██║   ██╔╝ ██╗██║╚██████╗    ███████║
+     ╚═╝   ╚═╝  ╚═╝╚═╝ ╚═════╝   ╚══════╝
+
+  FVAIOS - Fast, Versatile, Advanced Operating System
+  Version 1.0.0 | Alpine Linux x86_64
+
+EOF
+
+# System info
+echo "  Hostname: $(hostname)"
+echo "  Kernel:   $(uname -r)"
+echo "  Uptime:   $(uptime -p)"
+echo ""
+echo "  Type 'install' to install FVAIOS to disk"
+echo ""
